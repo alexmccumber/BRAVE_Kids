@@ -205,21 +205,15 @@ uniques=getUniques(seqtab.nochim)
 
 sequences=names(uniques)
 
-uniquesToFasta(uniques,fout = "~/BRAVE_Kids/sepp-package/seqs.fasta", ids=sequences)
+uniquesToFasta(uniques,fout = "~/BRAVE_Kids/seqs.fasta", ids=sequences)
 ```
 
 ```{bash}
-
-gzip ./sepp-package/seqs.fasta
-```
-
-
-```{bash}
-/opt/sepp-package/run-sepp.sh sepp-package/test.frag test-gg
+./sepp-package/run-sepp.sh seqs.fasta BRAVE
 ```
 
 ```{r, view tree file with ggtree}
-seq.tree = read.tree(file = "~/PigLungs/pigs_placement.tog.relabelled.tre") %>%
+seq.tree = read.tree(file = "~/BRAVE_Kids/BRAVE_placement.tog.relabelled.tre") %>%
   keep.tip(., sequences)
 ```
 
@@ -240,11 +234,10 @@ rm(metad)
 #need to change seqtab.nochim to have same sample names as metadata
 rownames(seqtab.nochim) = gsub("_.*","",rownames(seqtab.nochim))
 
-
-
 ps = phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
                sample_data(metaDF), 
-               tax_table(taxid))
+               tax_table(taxid),
+              phy_tree(seq.tree))
 
 saveRDS(ps, "ps.RDS")
 ```
@@ -299,7 +292,7 @@ subset_samples(ps.noncontam, sample_data(ps.noncontam)$brave_id == "PCRneg") %>%
 which(contamdf.freq$contaminant)
 ```
 
-
+#Test for threshold 0.1 vs 0.2 for decontam
 ```{r}
 contamdf.freq = isContaminant(ps, method="frequency", conc = "dna", threshold = 0.1)
 
@@ -389,5 +382,36 @@ model.interpretation.plot(sc.obj, consens.thres = 0.7,
                           fn.plot = '~/BRAVE_Kids/interpretation_plot.pdf')
 ```
 
+#Run Siamcat between asymptomatic and symp cases
+```{r}
+ps.NP = subset_samples(ps.noncontam, sample_data(ps.noncontam)$method_np == "NP") 
 
+sc.obj <- siamcat(label = 'symptoms_any', case = '1', phyloseq = ps.NP)
+
+sc.obj <- filter.features(sc.obj, filter.method = 'abundance', cutoff = 1e-03)
+
+#sc.obj <- filter.features(sc.obj, filter.method = 'prevalence', 
+#                          cutoff = 0.05, feature.type = 'filtered')
+
+sc.obj <- normalize.features(sc.obj, norm.method = 'log.std',
+                             norm.param = list(log.n0=1e-05, sd.min.q=0))
+
+sc.obj <- create.data.split(sc.obj, num.folds = 5, num.resample = 5)
+
+sc.obj <- train.model(sc.obj, method='lasso')
+
+sc.obj <- make.predictions(sc.obj)
+
+sc.obj <- evaluate.predictions(sc.obj)
+
+model.evaluation.plot(sc.obj, fn.plot = '~/BRAVE_Kids/eval_plot.pdf')
+
+model.interpretation.plot(sc.obj, consens.thres = 0.7,
+                          fn.plot = '~/BRAVE_Kids/interpretation_plot.pdf')
+```
+
+
+```{r}
+
+```
 
