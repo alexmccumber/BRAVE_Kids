@@ -6,6 +6,7 @@ output: html_document
 ---
 
 ```{r, include=FALSE}
+#load some libraries
 library(dada2)
 library(dplyr)
 library(tibble)
@@ -17,21 +18,31 @@ library(Biostrings)
 library(ggtree)
 library(ape)
 library(stringr)
-
-##needed to install the following packages for decontam:
-#install.packages("isoband")
-#install.packages("brio")
-#install.packages("rematch2")
-#install.packages("waldo")
-#install.packages("digest")
-#BiocManager::install("SIAMCAT")
-require(siamcat)
-
+library(vegan)
+library(magrittr)
+library(ape)
+library(philr)
+library(glmnet)
+library(DESeq2)
+library(tidyverse)
+library(cluster)
 library(devtools)
-devtools::install_github("benjjneb/decontam")
-
 library(decontam)
+library(picante)
+library(vegan)
+library(phyloseq)
+library(tidyr)
+library(nlme)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(compositions)
 ```
+
+```{r}
+dir.create("~/BRAVE_Kids/")
+```
+
 
 #Set filepaths and get sample names
 ```{r, Set filepaths}
@@ -111,25 +122,12 @@ filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
 #set multithread to False if you're running Windows
 errF = learnErrors(filtFs, multithread = T)
 errR = learnErrors(filtRs, multithread = T)
-names(filtFs) = sample.names
-names(filtRs) = sample.names
-mergers <- vector("list", length(sample.names))
-names(mergers) <- sample.names
-for(sam in sample.names) {
-  cat("Processing:", sam, "\n")
-    derepF <- derepFastq(filtFs[[sam]])
-    ddF <- dada(derepF, err=errF, multithread=T)
-    derepR <- derepFastq(filtRs[[sam]])
-    ddR <- dada(derepR, err=errR, multithread=T)
-    merger <- mergePairs(ddF, derepF, ddR, derepR)
-    mergers[[sam]] <- merger
-}
+
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE, pool = T)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE, pool = T)
+
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
 ```
-
-```{r}
-
-```
-
 
 ```{r}
 plotErrors(errF, nominalQ=TRUE)
@@ -174,7 +172,7 @@ load("~/BRAVE_Kids/silvadb/SILVA_SSU_r138_2019.RData")
 
 ids <- IdTaxa(dna, trainingSet, strand="top", processors=12, verbose=FALSE)
 
-ranks <- c("domain", "phylum", "class", "order", "family", "genus", "species") # ranks of interest
+ranks <- c("domain", "phylum", "class", "order", "family", "genus") # ranks of interest
 
 # Convert the output object of class "Taxa" to a matrix analogous to the output from assignTaxonomy
 taxid <- t(sapply(ids, function(x) {
@@ -186,7 +184,7 @@ taxid <- t(sapply(ids, function(x) {
 colnames(taxid) <- ranks; rownames(taxid) <- getSequences(seqtab.nochim)
 ```
 
-##Creation of tree, currently not working........
+##Creation of tree, need to run through python 2
 
 ```{bash, make a tree with SEPP using gg backbone tree}
 wget  "https://raw.github.com/smirarab/sepp-refs/master/gg/sepp-package.tar.bz"
@@ -220,11 +218,15 @@ seq.tree = read.tree(file = "~/BRAVE_Kids/BRAVE_placement.tog.relabelled.tre") %
 
 #Import metadata and make dataframe
 ```{r}
-metad = read.csv("~/BRAVE_Kids/metadata_16s_set1.csv") 
+metad = read_csv("~/BRAVE_Kids/metadata_16sv2.csv")
 
 rownames(metad) = str_remove_all(metad$brave_id, "-")
 
 metaDF = subset(metad, rownames(metad) %in% gsub("_.*","",sample.names))
+
+rownames(metaDF) = str_remove_all(metaDF$brave_id, "-")
+
+metaDF$X1=NULL
 
 rm(metad)
 ```
@@ -239,179 +241,620 @@ ps = phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE),
                tax_table(taxid),
               phy_tree(seq.tree))
 
-saveRDS(ps, "ps.RDS")
+ps.Bact=subset_taxa(ps, domain=="Bacteria") 
+
+saveRDS(ps.Bact, "~/BRAVE_Kids/ps.RDS")
+
+rm(ps)
 ```
 
 ```{r}
 subset_samples(ps, sample_data(ps)$brave_id == "extractNEGctrl") %>%
   prune_species(speciesSums(.) > 0, .)
 
-#52 ASVs in extractNEGctrl
+#59 ASVs in extractNEGctrl
 
 subset_samples(ps, sample_data(ps)$brave_id == "PCRneg") %>%
   prune_species(speciesSums(.) > 0, .)
 
-#3 ASVs in PCRneg
+#4 ASVs in PCRneg
 ```
-
 
 #Decontam 
 ```{r}
-contamdf.freq = isContaminant(ps, method="frequency", conc = "dna", threshold = 0.2)
+library("decontam")
+contamdf.freq = isContaminant(ps.Bact, method="frequency", conc = "dna", threshold = 0.1)
 
 hist(contamdf.freq$p)
 
 table(contamdf.freq$contaminant)
 
-#Identified 133 contaminant taxa in at 0.2
+#Identified 40 contaminant taxa in at 0.1
 #remove contaminant taxa
 
-ps.noncontam = prune_taxa(!contamdf.freq$contaminant, ps)
-```
+ps.noncontam = prune_taxa(!contamdf.freq$contaminant, ps.Bact)
 
-```{r}
-plot_frequency(ps, taxa_names(ps)[sample(which(contamdf.freq$contaminant),4)], conc="dna") +
+set.seed(42)
+plot_frequency(ps.Bact, taxa_names(ps.Bact)[sample(which(contamdf.freq$contaminant),4)], conc="dna") +
     xlab("DNA Concentration")
 ```
-
 
 ```{r}
 subset_samples(ps.noncontam, sample_data(ps.noncontam)$brave_id == "extractNEGctrl") %>%
   prune_species(speciesSums(.) > 0, .)
 
-#36 ASVs in extractNEGctrl
+#54 ASVs in extractNEGctrl
 
 subset_samples(ps.noncontam, sample_data(ps.noncontam)$brave_id == "PCRneg") %>%
   prune_species(speciesSums(.) > 0, .)
 
-#All PCR Neg Ctrl ASVs removed
+#2 PCR Neg Ctrl ASVs 
 ```
-
-
-```{r}
-which(contamdf.freq$contaminant)
-```
-
-#Test for threshold 0.1 vs 0.2 for decontam
-```{r}
-contamdf.freq = isContaminant(ps, method="frequency", conc = "dna", threshold = 0.1)
-
-hist(contamdf.freq$p)
-
-table(contamdf.freq$contaminant)
-
-#Identified 133 contaminant taxa in at 0.1
-#remove contaminant taxa
-
-ps.noncontam = prune_taxa(!contamdf.freq$contaminant, ps)
-
-set.seed(42)
-plot_frequency(ps, taxa_names(ps)[sample(which(contamdf.freq$contaminant),4)], conc="dna") +
-    xlab("DNA Concentration")
-```
-
 
 #Remove contaminants ID'ed by decontam and remove ctrl and non-study samples
-```{r}
-ps.noncontam = prune_taxa(!contamdf.freq$contaminant, ps) %>%
+```{r, mesesage = FALSE}
+ps.noncontam = prune_taxa(!contamdf.freq$contaminant, ps.Bact) %>%
   subset_samples(., sample_data(ps.noncontam)$sex != "NA") %>%
-  prune_samples(sample_sums(.)>=2000, .) %>%
-  transform_sample_counts(.,function(x) x/sum(x)) %>%
+  prune_samples(sample_sums(.)>=1000, .) %>%
+  #transform_sample_counts(.,function(x) x/sum(x)) %>%
   prune_species(speciesSums(.) > 0, .) 
+
+ps.noncontam
+
+saveRDS(ps.noncontam, "~/BRAVE_Kids/psBRAVE.RDS")
+
+# Number ASVs and store the exact sequences in the reference sequence slot - can access with refseq(ps)
+dna <- Biostrings::DNAStringSet(taxa_names(ps.noncontam))
+names(dna) <- taxa_names(ps.noncontam)
+phy.brave <- merge_phyloseq(ps.noncontam, dna)
+taxa_names(ps.noncontam) <- paste0(seq(ntaxa(ps.noncontam)))
+ps.noncontam
+remove(dna)
 ```
 
 ```{r}
-ordinate(ps.noncontam, method = "PCoA", distance = "bray") %>%
-plot_ordination(ps.noncontam, ., type="samples", color = "group", shape = "method_np")#+stat_ellipse()+theme_classic() 
+ps.noncontam = readRDS("~/BRAVE_Kids/psBRAVE.RDS")
 
+#Subset to NP only samples and remove Indeterminate COVID postiive/negative results
+ps.NP = subset_samples(ps.noncontam, sample_data(ps.noncontam)$method_np == "NP" & sample_data(ps.noncontam)$corona != "Indeterminate") %>%
+  prune_species(speciesSums(.) > 0, .) 
+
+ps.NP.r = transform_sample_counts(ps.NP,function(x) x/sum(x)) 
+
+saveRDS(ps.NP, "~/BRAVE_Kids/psNP.RDS")
 ```
 
+```{r, include = FALSE}
+# Function to make matrix usable for vegan from phyloseq object
+vegan_otu <- function(physeq) {
+    OTU <- otu_table(physeq)
+    if (taxa_are_rows(OTU)) {
+        OTU <- t(OTU)
+    }
+    return(as(OTU, "matrix"))
+}
+```
+
+#Code for Figures 1A and 1B
 ```{r}
-plot_richness(ps.noncontam, x="vl_log", color="method_np", measures="Shannon")
+sampleDF = sampleDF %>%
+    mutate(agebin = case_when(age < 2 ~ '0-2',
+                              age < 5 ~ '3-5',
+                              age < 8 ~ '6-8',
+                              age < 11 ~ '9-11',
+                              age < 14 ~ '12-14',
+                              age < 17 ~ '15-17',
+                              TRUE ~ '18-20'))
 
-plot_richness(ps.noncontam, x="age", color="method_np", measures="Shannon")
+Shannon = estimate_richness(ps.NP, measures = "Shannon") %>%
+  cbind(., sampleDF, by = "names") 
 
-plot_richness(ps.noncontam, x="timing_np", color="method_np", measures="Shannon")
+Shannon$agebin = factor(Shannon$agebin, levels = c('0-2','3-5','6-8','9-11','12-14','15-17','18-20'))
 
-metaDF.merge = mutate(metaDF, names = rownames(metaDF))
+sampleDF = sampleDF %>%
+    mutate(Group1 = case_when(Group == 'Negative' ~ 'Negative',
+                              Group == 'PosResp' ~ 'Positve (respiratory SX)',
+                              Group == 'Pos_NoResp' ~ 'Positive (no respiratory SX)'))
 
-Shannon = estimate_richness(ps.noncontam, measures = "Shannon") %>%
-  mutate(., names = rownames(.)) %>%
-  left_join(., metaDF.merge, by = "names") %>%
-  filter(., age != "NA")
+ggplot(Shannon, aes(x=agebin, y=Shannon)) +
+  geom_point(aes(color=Group1), alpha = 0.3) +
+  scale_color_manual(values=c("darkslategray4", "mediumorchid4","#BF812D")) +
+  stat_summary(aes(y=Shannon, group = Group1, color = Group1), fun.y = mean, geom = "line")+
+  theme_bw()+
+  xlab("Age (years)")+
+  ylab("Shannon diversity") + 
+  labs(color = "SARS-CoV-2 status") +
+  scale_y_continuous(limits = c(0,4)) + 
+  theme(legend.position = "none")
 
-ggplot(Shannon, aes(group, Shannon, fill = group)) + 
-  geom_boxplot() +expand_limits(y=0)  + 
+Chao = estimate_richness(ps.NP, measures = "Chao1") %>%
+  cbind(., sampleDF, by = "names") 
+
+Chao$agebin = factor(Chao$agebin, levels = c('0-2','3-5','6-8','9-11','12-14','15-17','18-20'))
+
+ggplot(Chao, aes(x=agebin, y=Chao1)) +
+  geom_point(aes(color=Group1), alpha = 0.3) +
+  scale_color_manual(values=c("darkslategray4", "mediumorchid4","#BF812D")) +
+  stat_summary(aes(y=Chao1, group = Group1, color = Group1), fun.y = mean, geom = "line")+
+  theme_bw()+
+  xlab("Age (years)")+
+  ylab("Chao1 richness") + 
+  labs(color = "SARS-CoV-2 status") +
+  scale_y_continuous(limits = c(0,250)) + 
+  theme(legend.position = "none")
+
+#4 by 5
+```
+
+#Code for Figure 1C
+```{r}
+ord = ordinate(ps.NP.r, method = "NMDS", distance = "bray", trymax = 1000)
+
+sampleDF = sample_data(ps.NP.r) %>%
+  data.frame(.)
+
+sampleDF$agebin = factor(sampleDF$agebin, levels = c('0-2','3-5','6-8','9-11','12-14','15-17','18-20'))
+
+sampleDF = sampleDF %>%
+    mutate(facet = case_when(agebin == '0-2' ~ '0-2 years',
+                              agebin == '3-5' ~ '3-5 years',
+                              agebin == '6-8' ~ '6-8 years',
+                              agebin == '9-11' ~ '9-11 years',
+                              agebin == '12-14' ~ '12-14 years',
+                              agebin == '15-17' ~ '15-17 years',
+                              TRUE ~ '18-20 years'))
+
+sampleDF$facet = factor(sampleDF$facet, levels = c('0-2 years','3-5 years','6-8 years','9-11 years','12-14 years','15-17 years','18-20 years'))
+
+sampleDF = sampleDF %>%
+    mutate(Group1 = case_when(Group == 'Negative' ~ 'Negative',
+                              Group == 'PosResp' ~ 'Positve (respiratory symptoms)',
+                              Group == 'Pos_NoResp' ~ 'Positive (no respiratory symptoms)'))
+
+ordDF = cbind(sampleDF, ord$points)
+ordDF2=ordDF
+ordDF$agebin=NULL
+ordDF$facet=NULL
+
+p=ggplot(data = ordDF, aes(x = MDS1, y = MDS2)) +
+  geom_point(data=ordDF, alpha=0.05) + 
+  geom_point(data = ordDF2, aes(color = Group1), alpha=0.7) + 
+  facet_wrap(~ facet, ncol=4) +
+  scale_color_manual(values = c("darkslategray4", "mediumorchid4","#BF812D")) + 
+  theme_bw() +
+  xlab("NMDS1") + 
+  ylab("NMDS2") +
+  labs(color = "SARS-CoV-2 status")+ 
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.1))
+
+#5.5 by 12
+```
+
+#Code to generate Figure 2
+```{r}
+#create age bins and lots of long code to make mean abundance profiles
+
+sampleDF = sample_data(ps.NP.r) %>%
+  data.frame(.)
+
+sampleDF = sampleDF %>%
+    mutate(agebin = case_when(age < 3 ~ '0-2',
+                              age < 6 ~ '3-5',
+                              age < 9 ~ '6-8',
+                              age < 12 ~ '9-11',
+                              age < 15 ~ '12-14',
+                              age < 18 ~ '15-17',
+                              TRUE ~ '18-20'))
+
+sample_data(ps.NP.r)$agebin = sampleDF$agebin
+
+ps.Genus = tax_glom(ps.NP.r, taxrank = "genus") 
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$agebin == '0-2')
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$domain = NULL
+genusDF$phylum=NULL
+genusDF$class=NULL
+genusDF$order=NULL
+genusDF$family=NULL
+rownames(genusDF) = genusDF$genus
+genusDF$genus=NULL
+genusDF$species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF1 = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$agebin == '3-5')
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$domain = NULL
+genusDF$phylum=NULL
+genusDF$class=NULL
+genusDF$order=NULL
+genusDF$family=NULL
+rownames(genusDF) = genusDF$genus
+genusDF$genus=NULL
+genusDF$species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF2 = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$agebin == '6-8')
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$domain = NULL
+genusDF$phylum=NULL
+genusDF$class=NULL
+genusDF$order=NULL
+genusDF$family=NULL
+rownames(genusDF) = genusDF$genus
+genusDF$genus=NULL
+genusDF$species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF3 = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$agebin == '9-11')
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$domain = NULL
+genusDF$phylum=NULL
+genusDF$class=NULL
+genusDF$order=NULL
+genusDF$family=NULL
+rownames(genusDF) = genusDF$genus
+genusDF$genus=NULL
+genusDF$species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF4 = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$agebin == '12-14')
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$domain = NULL
+genusDF$phylum=NULL
+genusDF$class=NULL
+genusDF$order=NULL
+genusDF$family=NULL
+rownames(genusDF) = genusDF$genus
+genusDF$genus=NULL
+genusDF$species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF5 = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$agebin == '15-17')
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$domain = NULL
+genusDF$phylum=NULL
+genusDF$class=NULL
+genusDF$order=NULL
+genusDF$family=NULL
+rownames(genusDF) = genusDF$genus
+genusDF$genus=NULL
+genusDF$species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF6 = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$agebin == '18-20')
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$domain = NULL
+genusDF$phylum=NULL
+genusDF$class=NULL
+genusDF$order=NULL
+genusDF$family=NULL
+rownames(genusDF) = genusDF$genus
+genusDF$genus=NULL
+genusDF$species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF7 = genusDF$C1 
+
+AvgDF = cbind(AvgDF1, AvgDF2, AvgDF3, AvgDF4, AvgDF5, AvgDF6, AvgDF7) %>%
+  data.frame(.)
+
+rownames(AvgDF) = rownames(genusDF)
+
+AvgDF$Avg = rowMeans(AvgDF)
+
+fig = top_n(AvgDF, 9, Avg) 
+
+Other = 1 - colSums(fig)
+
+fig = rbind(fig, Other)
+
+fig$tax = rownames(fig)
+
+fig[10,9] = "Other"
+
+fig = select(fig, -Avg) %>%
+  dplyr::rename('0-2' = AvgDF1,
+                '3-5' = AvgDF2,
+                '6-8' = AvgDF3,
+                '9-11' = AvgDF4,
+                '12-14' = AvgDF5,
+                '15-17' = AvgDF6,
+                '18-20' = AvgDF7)
+
+library(reshape2)
+f = melt(fig) 
+library(RColorBrewer)
+
+mycolors = c("#E41A1C","#4A72A6","#48A462","#7E6E85","#EC83BA","#FFB716","#e6550d","#B75F49","#5ab4ac","#666666")
+
+f$tax = factor(f$tax, levels=c("Anaerococcus","Corynebacterium","Dolosigranulum","Fusobacterium","Lawsonella","Moraxella", "Peptoniphilus", "Staphylococcus","Streptococcus","Other"))
+
+
+ggplot(f, aes(fill = tax, y=value, x=variable)) +
+  geom_bar(position="stack", stat="identity", color = "black", size = 0.25) +
+  scale_fill_manual(values = mycolors, labels = c(expression(italic("Anaerococcus")),expression(italic("Corynebacterium")),expression(italic("Dolosigranulum")),expression(italic("Fusobacterium")),expression(italic("Lawsonella")),expression(italic("Moraxella")), expression(italic("Peptoniphilus")), expression(italic("Staphylococcus")),expression(italic("Streptococcus")),"Other")) +
+  xlab("Age (years)") +
+  ylab("Mean relative abundance") +
+  labs(fill = "Genera") +
   theme_minimal() +
-  facet_grid(~method_np)
-  xlab(element_blank())
-
-g2
+  scale_y_continuous(limits = c(0,1), expand = c(0, 0))+
+theme(legend.text.align = 0)
 ```
 
+############insert ancom code###############
+
+#Figure 3A
 ```{r}
-plot_bar(ps.noncontam, fill = "phylum") + geom_bar()
+ancom_CorPN = read.csv("~/BRAVE_Kids/ancom2_corona_0.95_final.csv")
+
+ancom_CorPN$ASV = as.character(ancom_CorPN$ASV)
+
+sampleDF = sample_data(ps.NP.r) %>%
+  data.frame(.)
+
+corDF = sampleDF %>%
+  select(., corona)
+
+t=as.data.frame(ps.NP.r@tax_table@.Data[ancom_CorPN$ASV,]) %>%
+  select(., 'genus')
+
+d=otu_table(ps.NP.r)[,ancom_CorPN$ASV] %>%
+  t(.) %>%
+  as.data.frame(.) 
+  
+d1=cbind(d, t) %>%
+  mutate(., var = paste(genus, " ", "(ASV", " ", rownames(.), ")", sep = "")) %>%
+  select(., -genus) 
+  
+rownames(d1) = NULL
+
+d=tibble::column_to_rownames(d1,var = "var") %>%
+  t(.) %>%
+  as.data.frame(.) %>%
+  merge(., corDF, by = 0) %>%
+  select(., -Row.names) %>%
+  melt(., id.vars = "corona")
+
+d$value1 = d$value + 1E-6
+
+ggplot(d, aes(x = corona, y = value1, fill = corona)) +
+  geom_boxplot(show.legend = F) +
+  expand_limits(y=0)  +
+  scale_fill_manual(values = c("darkslategray4", "cornflowerblue"))+
+  theme_bw() +
+  facet_wrap(~ variable, ncol=4) +
+  ylab("Relative abundance") +
+  xlab("SARS-CoV-2 status") +
+  scale_y_continuous(breaks=c(0.0000001, 0.000001, 0.000001, 0.0001, 0.01, 1), trans = 'log') 
 ```
 
-
-#Siamcat analysis
+#Figure 3B
 ```{r}
-ps.NP = subset_samples(ps.noncontam, sample_data(ps.noncontam)$method_np == "NP")
+ancom_CorResp = read.csv("~/mouseenv/ancom2_resp_0.95_final.csv")
 
-sc.obj <- siamcat(label = 'corona', case = 'Positive', phyloseq = ps.NP)
+ancom_CorResp$ASV = as.character(ancom_CorResp$ASV)
 
-sc.obj <- filter.features(sc.obj, filter.method = 'abundance', cutoff = 1e-03)
+sampleDF = sample_data(ps.NP.r) %>%
+  data.frame(.)
 
-#sc.obj <- filter.features(sc.obj, filter.method = 'prevalence', 
-#                          cutoff = 0.05, feature.type = 'filtered')
+sampleDF = sampleDF %>%
+    mutate(PosBin = case_when(GroupBin == 'Negative' ~ 'Negative',
+                              GroupBin == 'PosResp' ~ 'Yes',
+                              GroupBin == 'Pos_NoResp' ~ 'No'))
 
-sc.obj <- normalize.features(sc.obj, norm.method = 'log.std',
-                             norm.param = list(log.n0=1e-05, sd.min.q=0))
+RespDF = sampleDF %>%
+  select(., PosBin)
 
-sc.obj <- create.data.split(sc.obj, num.folds = 10, num.resample = 10)
+t=as.data.frame(ps.Pos.r@tax_table@.Data[ancom_CorResp$ASV,]) %>%
+  select(., 'genus')
 
-sc.obj <- train.model(sc.obj, method='lasso')
+d=otu_table(ps.Pos.r)[,ancom_CorResp$ASV] %>%
+  t(.) %>%
+  as.data.frame(.) 
+  
+d1=cbind(d, t) %>%
+  mutate(., var = paste(genus, " ", "(ASV", " ", rownames(.), ")", sep = "")) %>%
+  select(., -genus) 
+  
+rownames(d1) = NULL
 
-sc.obj <- make.predictions(sc.obj)
+d=tibble::column_to_rownames(d1,var = "var") %>%
+  t(.) %>%
+  as.data.frame(.) %>%
+  merge(., RespDF, by = 0) %>%
+  select(., -Row.names) %>%
+  melt(., id.vars = "PosBin")
 
-sc.obj <- evaluate.predictions(sc.obj)
+d$value1 = d$value + 1E-6
 
-model.evaluation.plot(sc.obj, fn.plot = '~/BRAVE_Kids/eval_plot.pdf')
-
-model.interpretation.plot(sc.obj, consens.thres = 0.7,
-                          fn.plot = '~/BRAVE_Kids/interpretation_plot.pdf')
+ggplot(d, aes(x = PosBin, y = value1, fill = PosBin)) +
+  geom_boxplot(show.legend = F) +
+  expand_limits(y=0)  +
+  scale_fill_manual(values = c("mediumorchid4","#BF812D"))+
+  theme_bw() +
+  facet_wrap(~ variable, ncol=3, scales = 'free_y') +
+  ylab("Relative abundance") +
+  xlab("Respiratory symptoms") +
+  scale_y_continuous(breaks=c(0.0000001, 0.000001, 0.000001, 0.0001, 0.01, 1), trans = 'log') 
 ```
 
-#Run Siamcat between asymptomatic and symp cases
+#Figure 4A
 ```{r}
-ps.NP = subset_samples(ps.noncontam, sample_data(ps.noncontam)$method_np == "NP") 
+sampleDF = sample_data(ps.NP.r) %>%
+  data.frame(.)
 
-sc.obj <- siamcat(label = 'symptoms_any', case = '1', phyloseq = ps.NP)
+sampleDF = sampleDF %>%
+    mutate(agebin = case_when(age < 2 ~ '0-2',
+                              age < 5 ~ '3-5',
+                              age < 8 ~ '6-8',
+                              age < 11 ~ '9-11',
+                              age < 14 ~ '12-14',
+                              age < 17 ~ '15-17',
+                              TRUE ~ '18-20'))
 
-sc.obj <- filter.features(sc.obj, filter.method = 'abundance', cutoff = 1e-03)
+sampleDF$agebin = factor(sampleDF$agebin, levels = c('0-2','3-5','6-8','9-11','12-14','15-17','18-20'))
 
-#sc.obj <- filter.features(sc.obj, filter.method = 'prevalence', 
-#                          cutoff = 0.05, feature.type = 'filtered')
+sampleDF = sampleDF %>%
+    mutate(PosBin = case_when(GroupBin == 'Negative' ~ 'Negative',
+                              GroupBin == 'PosResp' ~ 'Yes',
+                              GroupBin == 'Pos_NoResp' ~ 'No'))
 
-sc.obj <- normalize.features(sc.obj, norm.method = 'log.std',
-                             norm.param = list(log.n0=1e-05, sd.min.q=0))
+RespDF = sampleDF %>%
+  select(., agebin, PosBin)
 
-sc.obj <- create.data.split(sc.obj, num.folds = 5, num.resample = 5)
+t=as.data.frame(ps.NP.r@tax_table@.Data[ancom_CorResp$ASV,]) %>%
+  select(., 'genus')
 
-sc.obj <- train.model(sc.obj, method='lasso')
+d=otu_table(ps.NP.r)[,ancom_CorResp$ASV] %>%
+  t(.) %>%
+  as.data.frame(.) 
+  
+d1=cbind(d, t) %>%
+  mutate(., var = paste(genus, " ", "(ASV", " ", rownames(.), ")", sep = "")) %>%
+  select(., -genus) 
+  
+rownames(d1) = NULL
 
-sc.obj <- make.predictions(sc.obj)
+d=tibble::column_to_rownames(d1,var = "var") %>%
+  t(.) %>%
+  as.data.frame(.) %>%
+  merge(., RespDF, by = 0) %>%
+  select(., -Row.names, PosBin) %>%
+  melt(., id.vars = "agebin")
 
-sc.obj <- evaluate.predictions(sc.obj)
+d2=tibble::column_to_rownames(d1,var = "var") %>%
+  t(.) %>%
+  as.data.frame(.) %>%
+  merge(., RespDF, by = 0) %>%
+  select(., -Row.names, agebin) %>%
+  melt(., id.vars = "PosBin")
 
-model.evaluation.plot(sc.obj, fn.plot = '~/BRAVE_Kids/eval_plot.pdf')
+d3 = merge(d, d2, by= 0) %>%
+  select(., agebin, PosBin, value.x, variable.x)
 
-model.interpretation.plot(sc.obj, consens.thres = 0.7,
-                          fn.plot = '~/BRAVE_Kids/interpretation_plot.pdf')
+d3$value.x = as.numeric(d3$value.x)
+
+d3$value1 = d3$value.x + 1E-6
+
+d3 = subset(d3, d3$variable.x != "PosBin" & d3$PosBin != "Negative")
+
+p=ggplot(d3, aes(x=agebin, y=value1)) +
+  geom_boxplot(aes(fill=PosBin)) +
+  scale_fill_manual(values=c("mediumorchid4","#BF812D"), name = "Respiratory symptoms") +
+  #stat_summary(aes(y=value1, group = GroupBin, color = GroupBin), fun.y = mean, geom = "line")+
+  theme_bw()+
+  xlab("Age (years)")+
+  ylab("Relative abundance") + 
+  facet_wrap(~ variable.x, ncol=3, scales = 'free_y') +
+  scale_y_continuous(breaks=c(0.0000001, 0.000001, 0.000001, 0.0001, 0.01, 1), trans = 'log') 
 ```
 
-
+#Figure 4B
 ```{r}
+ancom_CorPN = read.csv("~/BRAVE_Kids/ancom2_corona_0.95_final.csv")
 
+ancom_CorPN$ASV = as.character(ancom_CorPN$ASV)
+
+sampleDF = sample_data(ps.NP.r) %>%
+  data.frame(.)
+
+sampleDF = sampleDF %>%
+    mutate(agebin = case_when(age < 2 ~ '0-2',
+                              age < 5 ~ '3-5',
+                              age < 8 ~ '6-8',
+                              age < 11 ~ '9-11',
+                              age < 14 ~ '12-14',
+                              age < 17 ~ '15-17',
+                              TRUE ~ '18-20'))
+
+sampleDF$agebin = factor(sampleDF$agebin, levels = c('0-2','3-5','6-8','9-11','12-14','15-17','18-20'))
+
+corDF = sampleDF %>%
+  select(., corona, agebin)
+
+t=as.data.frame(ps.NP.r@tax_table@.Data[ancom_CorPN$ASV,]) %>%
+  select(., 'genus')
+
+d=otu_table(ps.NP.r)[,ancom_CorPN$ASV] %>%
+  t(.) %>%
+  as.data.frame(.) 
+  
+d1=cbind(d, t) %>%
+  mutate(., var = paste(genus, " ", "(ASV", " ", rownames(.), ")", sep = "")) %>%
+  select(., -genus) 
+  
+rownames(d1) = NULL
+
+d=tibble::column_to_rownames(d1,var = "var") %>%
+  t(.) %>%
+  as.data.frame(.) %>%
+  merge(., corDF, by = 0) %>%
+  select(., -Row.names, agebin) %>%
+  melt(., id.vars = "agebin")
+
+d2=tibble::column_to_rownames(d1,var = "var") %>%
+  t(.) %>%
+  as.data.frame(.) %>%
+  merge(., corDF, by = 0) %>%
+  select(., -Row.names) %>%
+  melt(., id.vars = "corona")
+
+d3 = merge(d, d2, by= 0) %>%
+  select(., agebin, corona, value.x, variable.x) %>%
+  subset(., variable.x != "corona")
+
+d3$value.x = as.numeric(d3$value.x)
+
+d3$value1 = d3$value.x + 1E-6
+
+ggplot(d3, aes(x = agebin, y = value1, fill = corona)) +
+  geom_boxplot() +
+  expand_limits(y=0)  +
+  scale_fill_manual(values = c("darkslategray4", "cornflowerblue"), name = "SARS-CoV-2 status")+
+  theme_bw() +
+  facet_wrap(~ variable.x) +
+  ylab("Relative abundance") +
+  xlab("Age (years)") +
+  scale_y_continuous(breaks=c(0.0000001, 0.000001, 0.000001, 0.0001, 0.01, 1), trans = 'log') 
 ```
-
