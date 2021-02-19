@@ -37,6 +37,7 @@ library(tidyverse)
 library(ggplot2)
 library(dplyr)
 library(compositions)
+source("~/BRAVE_Kids/ancom_v2.1.R")
 ```
 
 ```{r}
@@ -411,6 +412,8 @@ sampleDF = sampleDF %>%
                               Group == 'PosResp' ~ 'Positve (respiratory symptoms)',
                               Group == 'Pos_NoResp' ~ 'Positive (no respiratory symptoms)'))
 
+sample_data(ps.NP)$Group1 = sampleDF$Group1
+
 ordDF = cbind(sampleDF, ord$points)
 ordDF2=ordDF
 ordDF$agebin=NULL
@@ -622,7 +625,44 @@ ggplot(f, aes(fill = tax, y=value, x=variable)) +
 theme(legend.text.align = 0)
 ```
 
-############insert ancom code###############
+#ANCOM by corona
+```{r}
+meta_data <- data.frame(sample_data(ps.NP))
+meta_data$sampleID = rownames(meta_data)
+otu_data <- data.frame(otu_table(ps.NP))
+otu_id <- row.names(otu_data)
+otu_data <- data.frame(t(otu_table(ps.NP)))
+colnames(otu_data) <- otu_id
+
+feature_table = otu_data
+
+sample_var = "sampleID" 
+group_var = NULL
+out_cut = 0.05 
+zero_cut = 0.95 
+lib_cut = 1000 
+neg_lb = TRUE
+prepro = feature_table_pre_process(feature_table, meta_data, sample_var, group_var, out_cut, zero_cut, lib_cut, neg_lb)
+
+feature_table = prepro$feature_table # Preprocessed feature table
+meta_data = prepro$meta_data # Preprocessed metadata
+struc_zero = prepro$structure_zeros # Structural zero info
+
+main_var = "corona"
+p_adj_method = "BH"
+alpha = 0.05
+adj_formula = "age" 
+rand_formula = NULL
+res_cor = ANCOM(feature_table, meta_data, struc_zero, main_var, p_adj_method, alpha, adj_formula, rand_formula)
+
+res = res_cor$out %>%
+  subset(., detected_0.8 == TRUE) %>%
+  rename(ASV = taxa_id)
+
+write.csv(res, "~/BRAVE_Kids/ancom2_corona_0.95_final.csv")
+
+rm(adj_formula, alpha, group_var, lib_cut, main_var, neg_lb, otu_id, out_cut, p_adj_method, rand_formula, sample_var, struc_zero, zero_cut, feature_table, meta_data, otu_data, prepro)
+```
 
 #Figure 3A
 ```{r}
@@ -669,9 +709,51 @@ ggplot(d, aes(x = corona, y = value1, fill = corona)) +
   scale_y_continuous(breaks=c(0.0000001, 0.000001, 0.000001, 0.0001, 0.01, 1), trans = 'log') 
 ```
 
+#ANCOM by respiratory symptoms
+```{r}
+ps.NP.pos = subset_samples(ps.NP,sample_data(ps.NP)$corona != "Negative")
+
+meta_data <- data.frame(sample_data(ps.NP.pos))
+meta_data$sampleID = rownames(meta_data)
+otu_data <- data.frame(otu_table(ps.NP.pos))
+otu_id <- row.names(otu_data)
+otu_data <- data.frame(t(otu_table(ps.NP.pos)))
+colnames(otu_data) <- otu_id
+
+feature_table = otu_data
+
+sample_var = "sampleID" 
+group_var = "resp_sx_any"
+out_cut = 0.05 
+zero_cut = 0.95 
+lib_cut = 1000 
+neg_lb = TRUE
+prepro = feature_table_pre_process(feature_table, meta_data, sample_var, group_var, out_cut, zero_cut, lib_cut, neg_lb)
+
+feature_table = prepro$feature_table # Preprocessed feature table
+meta_data = prepro$meta_data # Preprocessed metadata
+struc_zero = prepro$structure_zeros # Structural zero info
+
+main_var = "resp_sx_any"
+p_adj_method = "BH"
+alpha = 0.05
+adj_formula = "age" 
+rand_formula = NULL
+res_cor = ANCOM(feature_table, meta_data, struc_zero, main_var, p_adj_method, alpha, adj_formula, rand_formula)
+
+res = res_cor$out %>%
+  subset(., detected_0.8 == TRUE) %>%
+  rename(ASV = taxa_id) %>%
+  subset(., W!="Inf")
+
+write.csv(res, "~/BRAVE_Kids/ancom2_resp_0.95_final.csv")
+
+rm(adj_formula, alpha, group_var, lib_cut, main_var, neg_lb, otu_id, out_cut, p_adj_method, rand_formula, sample_var, struc_zero, zero_cut, feature_table, meta_data, otu_data, prepro)
+```
+
 #Figure 3B
 ```{r}
-ancom_CorResp = read.csv("~/mouseenv/ancom2_resp_0.95_final.csv")
+ancom_CorResp = read.csv("~/BRAVE_Kids/ancom2_resp_0.95_final.csv")
 
 ancom_CorResp$ASV = as.character(ancom_CorResp$ASV)
 
@@ -679,12 +761,14 @@ sampleDF = sample_data(ps.NP.r) %>%
   data.frame(.)
 
 sampleDF = sampleDF %>%
-    mutate(PosBin = case_when(GroupBin == 'Negative' ~ 'Negative',
-                              GroupBin == 'PosResp' ~ 'Yes',
-                              GroupBin == 'Pos_NoResp' ~ 'No'))
+    mutate(PosBin = case_when(Group == 'Negative' ~ 'Negative',
+                              Group == 'PosResp' ~ 'Yes',
+                              Group == 'Pos_NoResp' ~ 'No'))
 
 RespDF = sampleDF %>%
   select(., PosBin)
+
+ps.Pos.r = subset_samples(ps.NP.r, sample_data(ps.NP.r)$corona == "Positive")
 
 t=as.data.frame(ps.Pos.r@tax_table@.Data[ancom_CorResp$ASV,]) %>%
   select(., 'genus')
@@ -719,8 +803,53 @@ ggplot(d, aes(x = PosBin, y = value1, fill = PosBin)) +
   scale_y_continuous(breaks=c(0.0000001, 0.000001, 0.000001, 0.0001, 0.01, 1), trans = 'log') 
 ```
 
+#ANCOM by age
+```{r}
+meta_data <- data.frame(sample_data(ps.NP))
+meta_data$sampleID = rownames(meta_data)
+otu_data <- data.frame(otu_table(ps.NP))
+otu_id <- row.names(otu_data)
+otu_data <- data.frame(t(otu_table(ps.NP)))
+colnames(otu_data) <- otu_id
+
+feature_table = otu_data
+
+sample_var = "sampleID" 
+group_var = "age_cat"
+out_cut = 0.05 
+zero_cut = 0.95 
+lib_cut = 1000 
+neg_lb = TRUE
+prepro = feature_table_pre_process(feature_table, meta_data, sample_var, group_var, out_cut, zero_cut, lib_cut, neg_lb)
+
+feature_table = prepro$feature_table # Preprocessed feature table
+meta_data = prepro$meta_data # Preprocessed metadata
+struc_zero = prepro$structure_zeros # Structural zero info
+
+main_var = "age"
+p_adj_method = "BH"
+alpha = 0.05
+adj_formula = "Group" 
+rand_formula = NULL
+res_cor = ANCOM(feature_table, meta_data, struc_zero, main_var, p_adj_method, alpha, adj_formula, rand_formula)
+
+res = res_cor$out %>%
+  subset(., detected_0.8 == TRUE) %>%
+  rename(ASV = taxa_id) %>%
+  subset(., W!="Inf")
+
+write.csv(res, "~/BRAVE_Kids/ancom2_age_0.95_final.csv")
+
+rm(adj_formula, alpha, group_var, lib_cut, main_var, neg_lb, otu_id, out_cut, p_adj_method, rand_formula, sample_var, struc_zero, zero_cut, feature_table, meta_data, otu_data, prepro)
+```
+
 #Figure 4A
 ```{r}
+ancom_age = read.csv("~/BRAVE_Kids/ancom2_age_0.95_final.csv")
+
+#Same ASVs present, only showing those 9
+ancomR = ancom_age[ancom_CorResp$ASV,]
+
 sampleDF = sample_data(ps.NP.r) %>%
   data.frame(.)
 
