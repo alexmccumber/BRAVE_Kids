@@ -249,18 +249,6 @@ saveRDS(ps.Bact, "~/BRAVE_Kids/ps.RDS")
 rm(ps)
 ```
 
-```{r}
-subset_samples(ps, sample_data(ps)$brave_id == "extractNEGctrl") %>%
-  prune_species(speciesSums(.) > 0, .)
-
-#59 ASVs in extractNEGctrl
-
-subset_samples(ps, sample_data(ps)$brave_id == "PCRneg") %>%
-  prune_species(speciesSums(.) > 0, .)
-
-#4 ASVs in PCRneg
-```
-
 #Decontam 
 ```{r}
 library("decontam")
@@ -384,7 +372,29 @@ ggplot(Chao, aes(x=agebin, y=Chao1)) +
   scale_y_continuous(limits = c(0,250)) + 
   theme(legend.position = "none")
 
-#4 by 5
+summary(Chao$Chao1)
+
+summary(Shannon$Shannon)
+
+shapiro.test(Shannon$Shannon)
+
+model = lm(Shannon ~ age, data = Shannon)
+summary(model)
+
+shapiro.test(Chao$Chao1)
+
+Chao$logChao = log(Chao$Chao1)
+
+shapiro.test(Chao$logChao) #p = 0.33
+
+model = lm(logChao ~ age+Group, data = Chao)
+summary(model)
+
+fit = aov(logChao ~ corona+age, data = Chao)
+summary(fit)
+
+model = aov(logChao ~ Group*age, data = Chao)
+summary(model)
 ```
 
 #Code for Figure 1C
@@ -430,7 +440,11 @@ p=ggplot(data = ordDF, aes(x = MDS1, y = MDS2)) +
   labs(color = "SARS-CoV-2 status")+ 
   scale_y_continuous(labels = scales::number_format(accuracy = 0.1))
 
-#5.5 by 12
+PermDF = data.frame(sample_data(ps.NP))
+
+BetaD=vegdist(vegan_otu(ps.NP), "bray")
+
+adonis(BetaD~age, permutations = 999, data=PermDF)
 ```
 
 #Code to generate Figure 2
@@ -625,6 +639,8 @@ ggplot(f, aes(fill = tax, y=value, x=variable)) +
 theme(legend.text.align = 0)
 ```
 
+
+
 #ANCOM by corona
 ```{r}
 meta_data <- data.frame(sample_data(ps.NP))
@@ -698,15 +714,17 @@ d=tibble::column_to_rownames(d1,var = "var") %>%
 
 d$value1 = d$value + 1E-6
 
-ggplot(d, aes(x = corona, y = value1, fill = corona)) +
+g=ggplot(d, aes(x = corona, y = value1, fill = corona)) +
   geom_boxplot(show.legend = F) +
   expand_limits(y=0)  +
   scale_fill_manual(values = c("darkslategray4", "cornflowerblue"))+
   theme_bw() +
-  facet_wrap(~ variable, ncol=4) +
+  facet_wrap(~ variable, ncol=1) +
   ylab("Relative abundance") +
   xlab("SARS-CoV-2 status") +
-  scale_y_continuous(breaks=c(0.0000001, 0.000001, 0.000001, 0.0001, 0.01, 1), trans = 'log') 
+  scale_y_continuous(breaks=c(0.000001,0.00001, 0.0001,0.001, 0.01,0.1, 1), trans = 'log') 
+
+ggsave(file="~/BRAVE_Kids/FigurePDF/ancomPosNeg.PDF", g, width = 10, height = 16, units = "cm")
 ```
 
 #ANCOM by respiratory symptoms
@@ -751,58 +769,6 @@ write.csv(res, "~/BRAVE_Kids/ancom2_resp_0.95_final.csv")
 rm(adj_formula, alpha, group_var, lib_cut, main_var, neg_lb, otu_id, out_cut, p_adj_method, rand_formula, sample_var, struc_zero, zero_cut, feature_table, meta_data, otu_data, prepro)
 ```
 
-#Figure 3B
-```{r}
-ancom_CorResp = read.csv("~/BRAVE_Kids/ancom2_resp_0.95_final.csv")
-
-ancom_CorResp$ASV = as.character(ancom_CorResp$ASV)
-
-sampleDF = sample_data(ps.NP.r) %>%
-  data.frame(.)
-
-sampleDF = sampleDF %>%
-    mutate(PosBin = case_when(Group == 'Negative' ~ 'Negative',
-                              Group == 'PosResp' ~ 'Yes',
-                              Group == 'Pos_NoResp' ~ 'No'))
-
-RespDF = sampleDF %>%
-  select(., PosBin)
-
-ps.Pos.r = subset_samples(ps.NP.r, sample_data(ps.NP.r)$corona == "Positive")
-
-t=as.data.frame(ps.Pos.r@tax_table@.Data[ancom_CorResp$ASV,]) %>%
-  select(., 'genus')
-
-d=otu_table(ps.Pos.r)[,ancom_CorResp$ASV] %>%
-  t(.) %>%
-  as.data.frame(.) 
-  
-d1=cbind(d, t) %>%
-  mutate(., var = paste(genus, " ", "(ASV", " ", rownames(.), ")", sep = "")) %>%
-  select(., -genus) 
-  
-rownames(d1) = NULL
-
-d=tibble::column_to_rownames(d1,var = "var") %>%
-  t(.) %>%
-  as.data.frame(.) %>%
-  merge(., RespDF, by = 0) %>%
-  select(., -Row.names) %>%
-  melt(., id.vars = "PosBin")
-
-d$value1 = d$value + 1E-6
-
-ggplot(d, aes(x = PosBin, y = value1, fill = PosBin)) +
-  geom_boxplot(show.legend = F) +
-  expand_limits(y=0)  +
-  scale_fill_manual(values = c("mediumorchid4","#BF812D"))+
-  theme_bw() +
-  facet_wrap(~ variable, ncol=3, scales = 'free_y') +
-  ylab("Relative abundance") +
-  xlab("Respiratory symptoms") +
-  scale_y_continuous(breaks=c(0.0000001, 0.000001, 0.000001, 0.0001, 0.01, 1), trans = 'log') 
-```
-
 #ANCOM by age
 ```{r}
 meta_data <- data.frame(sample_data(ps.NP))
@@ -843,12 +809,69 @@ write.csv(res, "~/BRAVE_Kids/ancom2_age_0.95_final.csv")
 rm(adj_formula, alpha, group_var, lib_cut, main_var, neg_lb, otu_id, out_cut, p_adj_method, rand_formula, sample_var, struc_zero, zero_cut, feature_table, meta_data, otu_data, prepro)
 ```
 
-#Figure 4A
+#Figure 3B
 ```{r}
+ancom_CorResp = read.csv("~/BRAVE_Kids/ancom2_resp_0.95_final.csv")
+
 ancom_age = read.csv("~/BRAVE_Kids/ancom2_age_0.95_final.csv")
 
 #Same ASVs present, only showing those 9
 ancomR = ancom_age[ancom_CorResp$ASV,]
+
+ancom_CorResp$ASV = as.character(ancom_CorResp$ASV)
+
+sampleDF = sample_data(ps.NP.r) %>%
+  data.frame(.)
+
+sampleDF = sampleDF %>%
+    mutate(PosBin = case_when(Group == 'Negative' ~ 'Negative',
+                              Group == 'PosResp' ~ 'Yes',
+                              Group == 'Pos_NoResp' ~ 'No'))
+
+RespDF = sampleDF %>%
+  select(., PosBin)
+
+ps.Pos.r = subset_samples(ps.NP.r, sample_data(ps.NP.r)$corona == "Positive")
+
+t=as.data.frame(ps.Pos.r@tax_table@.Data[ancom_CorResp$ASV,]) %>%
+  select(., 'genus')
+
+d=otu_table(ps.Pos.r)[,ancom_CorResp$ASV] %>%
+  t(.) %>%
+  as.data.frame(.) 
+  
+d1=cbind(d, t) %>%
+  mutate(., var = paste(genus, " ", "(ASV", " ", rownames(.), ")", sep = "")) %>%
+  select(., -genus) 
+  
+rownames(d1) = NULL
+
+d=tibble::column_to_rownames(d1,var = "var") %>%
+  t(.) %>%
+  as.data.frame(.) %>%
+  merge(., RespDF, by = 0) %>%
+  select(., -Row.names) %>%
+  melt(., id.vars = "PosBin")
+
+d$value1 = d$value + 1E-6
+
+g=ggplot(d, aes(x = PosBin, y = value1, fill = PosBin)) +
+  geom_boxplot(show.legend = F) +
+  expand_limits(y=0)  +
+  scale_fill_manual(values = c("mediumorchid4","#BF812D"))+
+  theme_bw() +
+  facet_wrap(~ variable, ncol=3) +
+  ylab("Relative abundance") +
+  xlab("Respiratory symptoms") +
+  scale_y_continuous(breaks=c(0.000001,0.00001, 0.0001,0.001, 0.01,0.1, 1), trans = 'log')
+
+
+ggsave(file="~/BRAVE_Kids/FigurePDF/ancomRespSX.PDF", g, width = 20, height = 16, units = "cm")
+```
+
+#Figure 4B
+```{r}
+ancom_age = read.csv("~/BRAVE_Kids/ancom2_age_0.95_final.csv")
 
 sampleDF = sample_data(ps.NP.r) %>%
   data.frame(.)
@@ -865,9 +888,9 @@ sampleDF = sampleDF %>%
 sampleDF$agebin = factor(sampleDF$agebin, levels = c('0-2','3-5','6-8','9-11','12-14','15-17','18-20'))
 
 sampleDF = sampleDF %>%
-    mutate(PosBin = case_when(GroupBin == 'Negative' ~ 'Negative',
-                              GroupBin == 'PosResp' ~ 'Yes',
-                              GroupBin == 'Pos_NoResp' ~ 'No'))
+    mutate(PosBin = case_when(Group == 'Negative' ~ 'Negative',
+                              Group == 'PosResp' ~ 'Yes',
+                              Group == 'Pos_NoResp' ~ 'No'))
 
 RespDF = sampleDF %>%
   select(., agebin, PosBin)
@@ -908,18 +931,20 @@ d3$value1 = d3$value.x + 1E-6
 
 d3 = subset(d3, d3$variable.x != "PosBin" & d3$PosBin != "Negative")
 
-p=ggplot(d3, aes(x=agebin, y=value1)) +
+g=ggplot(d3, aes(x=agebin, y=value1)) +
   geom_boxplot(aes(fill=PosBin)) +
   scale_fill_manual(values=c("mediumorchid4","#BF812D"), name = "Respiratory symptoms") +
   #stat_summary(aes(y=value1, group = GroupBin, color = GroupBin), fun.y = mean, geom = "line")+
   theme_bw()+
   xlab("Age (years)")+
   ylab("Relative abundance") + 
-  facet_wrap(~ variable.x, ncol=3, scales = 'free_y') +
-  scale_y_continuous(breaks=c(0.0000001, 0.000001, 0.000001, 0.0001, 0.01, 1), trans = 'log') 
+  facet_wrap(~ variable.x, ncol=3) +
+  scale_y_continuous(breaks=c(0.000001,0.00001, 0.0001,0.001, 0.01,0.1, 1), trans = 'log')
+
+ggsave(file="~/BRAVE_Kids/FigurePDF/ancomPosNeg_age.PDF", g, width = 30, height = 16, units = "cm")
 ```
 
-#Figure 4B
+#Figure 4A
 ```{r}
 ancom_CorPN = read.csv("~/BRAVE_Kids/ancom2_corona_0.95_final.csv")
 
@@ -977,13 +1002,47 @@ d3$value.x = as.numeric(d3$value.x)
 
 d3$value1 = d3$value.x + 1E-6
 
-ggplot(d3, aes(x = agebin, y = value1, fill = corona)) +
+g=ggplot(d3, aes(x = agebin, y = value1, fill = corona)) +
   geom_boxplot() +
   expand_limits(y=0)  +
   scale_fill_manual(values = c("darkslategray4", "cornflowerblue"), name = "SARS-CoV-2 status")+
   theme_bw() +
-  facet_wrap(~ variable.x) +
+  facet_wrap(~ variable.x, ncol = 1) +
   ylab("Relative abundance") +
   xlab("Age (years)") +
-  scale_y_continuous(breaks=c(0.0000001, 0.000001, 0.000001, 0.0001, 0.01, 1), trans = 'log') 
+  scale_y_continuous(breaks=c(0.000001,0.00001, 0.0001,0.001, 0.01,0.1, 1), trans = 'log')
+
+ggsave(file="~/BRAVE_Kids/FigurePDF/ancomCoronaAge.PDF", g, width = 15, height = 16, units = "cm")
 ```
+
+```{r}
+d = cbind(sampleDF,otu_table(ps.NP.r)[,c('1017', '1030')]) %>%
+  select(., '1017', '1030', age, corona) 
+
+d$ASV_1017 = d$`1017`
+d$ASV_1030 = d$`1030`
+
+dpos = d %>%
+  subset(., corona == "Positive")
+
+dneg = d %>%
+  subset(., corona == "Negative")
+
+wilcox.test(dpos$`1017`,dneg$`1017`)
+wilcox.test(dpos$`1030`,dneg$`1030`)
+
+cor.test(d$`1030`, d$age, method = "spearman")
+d$`1017`
+library(ggpubr)
+ggscatter(d, x = "age", y = "ASV_1017", 
+          add = "reg.line", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "spearman",
+          xlab = "age", ylab = "ASV")
+
+ggscatter(d, x = "age", y = "ASV_1030", 
+          add = "reg.line", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "spearman",
+          xlab = "age", ylab = "ASV")
+```
+
+
