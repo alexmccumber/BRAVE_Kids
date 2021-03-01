@@ -37,6 +37,7 @@ library(tidyverse)
 library(ggplot2)
 library(dplyr)
 library(compositions)
+#Need to download the ancom function before running
 source("~/BRAVE_Kids/ancom_v2.1.R")
 ```
 
@@ -165,7 +166,6 @@ colSums(track)
 wget http://www2.decipher.codes/Classification/TrainingSets/SILVA_SSU_r138_2019.RData -P ./silvadb
 ```
 
-
 ```{r}
 dna <- DNAStringSet(getSequences(seqtab.nochim)) # Create a DNAStringSet from the ASVs
 
@@ -185,8 +185,7 @@ taxid <- t(sapply(ids, function(x) {
 colnames(taxid) <- ranks; rownames(taxid) <- getSequences(seqtab.nochim)
 ```
 
-##Creation of tree, need to run through python 2
-
+##Creation of tree, need to run through python 2 (I think, I haven't been able to get this to work when I have python3 installed)
 ```{bash, make a tree with SEPP using gg backbone tree}
 wget  "https://raw.github.com/smirarab/sepp-refs/master/gg/sepp-package.tar.bz"
 
@@ -324,7 +323,7 @@ vegan_otu <- function(physeq) {
 }
 ```
 
-#Code for Figures 1A and 1B
+#Code for Figures 1A and 1B and evaluate differences in shannon and chao1 diversity/richness
 ```{r}
 sampleDF = sampleDF %>%
     mutate(agebin = case_when(age < 2 ~ '0-2',
@@ -381,10 +380,15 @@ shapiro.test(Shannon$Shannon)
 model = lm(Shannon ~ age, data = Shannon)
 summary(model)
 
+model = aov(Shannon ~ corona + age, Shannon)
+summary(model)
+
+#chao values are not normally distributed, so need to perform transformation
 shapiro.test(Chao$Chao1)
 
 Chao$logChao = log(Chao$Chao1)
 
+#log chao1 values are normally distributed 
 shapiro.test(Chao$logChao) #p = 0.33
 
 model = lm(logChao ~ age+Group, data = Chao)
@@ -399,7 +403,13 @@ summary(model)
 
 #Code for Figure 1C
 ```{r}
-ord = ordinate(ps.NP.r, method = "NMDS", distance = "bray", trymax = 1000)
+set.seed(6)
+
+ord = ordinate(ps.NP, method = "NMDS", distance = "bray", trymax = 1000)
+
+#converged at run 467
+
+ord$stress # 0.238
 
 sampleDF = sample_data(ps.NP.r) %>%
   data.frame(.)
@@ -444,7 +454,19 @@ PermDF = data.frame(sample_data(ps.NP))
 
 BetaD=vegdist(vegan_otu(ps.NP), "bray")
 
+#permanova by age
 adonis(BetaD~age, permutations = 999, data=PermDF)
+
+anosim(BetaD, PermDF$agebin, permutations = 999, distance = "bray",
+    parallel = getOption("mc.cores"))
+
+#look at age + covid (positive/negative) status
+PermDF = data.frame(sample_data(ps.NP))
+
+BetaD=vegdist(vegan_otu(ps.NP), "bray")
+
+adonis(BetaD~age+corona, permutations = 999, data=PermDF)
+
 ```
 
 #Code to generate Figure 2
@@ -1044,5 +1066,257 @@ ggscatter(d, x = "age", y = "ASV_1030",
           cor.coef = TRUE, cor.method = "spearman",
           xlab = "age", ylab = "ASV")
 ```
+#age summary stats
+```{r}
+genusDF = as.data.frame(cbind(t(otu_table(ps.Genus, taxa_are_rows = FALSE)), tax_table(ps.Genus)))
 
+genusDF$domain = NULL
+genusDF$phylum=NULL
+genusDF$class=NULL
+genusDF$order=NULL
+genusDF$family=NULL
+rownames(genusDF) = genusDF$genus
+genusDF$genus=NULL
+genusDF$species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+
+countDF = genusDF[c("Anaerococcus","Corynebacterium","Dolosigranulum","Fusobacterium","Lawsonella","Moraxella", "Peptoniphilus", "Staphylococcus","Streptococcus"),] %>%
+  t(.) %>%
+  data.frame(.) 
+
+countDF$agebin = sampleDF$agebin
+
+medDF = countDF %>%
+  group_by(., agebin) %>%
+  summarise_all(median) %>%
+  mutate_if(is.numeric, round, digits=3)
+
+rownames(medDF) = medDF$agebin
+
+
+#######begin function 
+summarystat = function(agerange){
+countDF2 = countDF %>%
+  subset(., agebin == agerange) %>%
+  summary(.) %>%
+  data.frame(.) %>%
+  separate(., Freq, c("variable", "value") ,sep = ":")%>%
+  select(., -Var1)  %>%
+  subset(., Var2 != "   agebin") %>%
+  dcast(., Var2 ~ variable)
+
+rownames(countDF2) = countDF2$Var2
+  
+countDF2 = mutate_all(countDF2, as.numeric) %>%
+  select(., -Var2) %>%
+  mutate_if(., is.numeric, round, digits=3) 
+  
+countDF2$IQR = paste(countDF2$`1st Qu.`, countDF2$`3rd Qu.`, sep = "-")
+
+countDF2$agerange = paste(countDF2$`Median `, countDF2$IQR, sep = ", ") 
+
+countDF2 = countDF2 %>%
+  select(., agerange) 
+}
+
+
+f1=summarystat("0-2") 
+f2=summarystat("3-5") 
+f3=summarystat("6-8") 
+f4=summarystat("9-11")
+f5=summarystat("12-14")
+f6=summarystat("15-17")
+f7=summarystat("18-20")
+
+f = cbind(f1,f2,f3,f4,f5,f6,f7)
+
+write.csv(f, "~/BRAVE_Kids/GenusSummary.csv")
+```
+
+```{r}
+propcount = function(agerange){
+countDF2 = countDF %>%
+  subset(., agebin == agerange) %>%
+  data.frame(.) %>%
+  select(., -agebin) %>%
+  mutate_all(function(x) ifelse(x>0, 1, 0)) %>%
+  t(.) %>%
+  data.frame(.)
+
+countDF2$samples = length(countDF2)
+
+countDF2$agebin = rowSums(countDF2) - countDF2$samples
+
+countDF2$prop = countDF2$agebin/countDF2$samples
+  
+countDF2$prop = round(countDF2$prop, digits=3)
+
+countDF2$final = paste(countDF2$agebin, countDF2$samples, sep = "/")
+countDF2$final = paste("(", countDF2$final, ")", sep = "")
+countDF2$final = paste(countDF2$prop, countDF2$final, sep = " ")
+
+return(countDF2$final)
+}
+
+f1=propcount("0-2") 
+f2=propcount("3-5") 
+f3=propcount("6-8") 
+f4=propcount("9-11")
+f5=propcount("12-14")
+f6=propcount("15-17")
+f7=propcount("18-20")
+
+f = cbind(f1,f2,f3,f4,f5,f6,f7) %>%
+  data.frame(.)
+
+rownames(f) = rownames(countDF2)
+
+f = f %>%
+  rename(., f1 = "0-2 years", f2 = "3-5 years", f3 = "6-8 years", f4 = "9-11 years", f5 = "12-14 years", f6 = "15-17 years", f7 = "18-20 years")
+
+write.csv(f, "~/BRAVE_Kids/SupplementalTable3.csv")
+```
+
+
+#DESeq2 Pos vs. Negative
+```{r}
+library(DESeq2)
+filter <- phyloseq::genefilter_sample(ps.NP, filterfun_sample(function(x) x >= 1), A = 0.05*nsamples(ps.NP))
+
+ps.DeS <- prune_taxa(filter, ps.NP) %>%
+  transform_sample_counts(., function(x) x+1)
+
+#sample_data(ps.DeS)$corona <- as.factor(sample_data(ps.DeS)$corona)
+
+ds = phyloseq_to_deseq2(ps.DeS, ~ corona + age)
+sample_data(ps.DeS)
+dds = DESeq(ds, fitType = 'local')
+
+res = results(dds)
+res = res[order(res$padj, na.last=NA), ]
+alpha = 0.05
+sigtab = res[(res$padj < alpha), ]
+sigtab = cbind(as(sigtab, "data.frame"), 
+               as(tax_table(ps.DeS)[rownames(sigtab), ], "matrix"))
+
+theme_set(theme_bw())
+sigtabgen = sigtab[ancom_CorPN$ASV,]
+# Phylum order
+x = tapply(sigtabgen$log2FoldChange, sigtabgen$domain, function(x) max(x))
+x = sort(x, TRUE)
+sigtabgen$domain = factor(as.character(sigtabgen$domain), levels=names(x))
+# Family order
+x = tapply(sigtabgen$log2FoldChange, sigtabgen$genus, function(x) max(x))
+x = sort(x, TRUE)
+
+sigtabgen$genus = factor(as.character(sigtabgen$genus), levels=names(x))
+
+ggplot(sigtabgen, aes(y=genus, x=log2FoldChange, color=genus)) + 
+  geom_vline(xintercept = 0.0, color = "gray", size = 0.5) +
+  geom_point(size=2) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5)) +
+  xlab("Log 2 Fold Change") +
+  ylab("Genus") + 
+  scale_color_manual(values = "#4A72A6") +
+  scale_x_continuous(limits = c(-1, 1)) 
+
+ggsave(file="~/BRAVE_Kids/Figures/DESeq2_corona.PDF", g, width = 20, height = 4, units = "cm")
+
+write.csv(sigtabgen, "~/BRAVE_Kids/RespSympAnyDeseq.csv")
+```
+
+```{r}
+library(DESeq2)
+
+filter <- phyloseq::genefilter_sample(ps.NP.pos, filterfun_sample(function(x) x >= 1), A = 0.05*nsamples(ps.NP.pos))
+
+ps.DeS <- prune_taxa(filter, ps.NP.pos) %>%
+  transform_sample_counts(., function(x) x+1)
+
+ds = phyloseq_to_deseq2(ps.DeS, ~ resp_sx_any + age)
+sample_data(ps.DeS)
+dds = DESeq(ds)
+
+res = results(dds)
+res = res[order(res$padj, na.last=NA), ]
+alpha = 0.05
+sigtab = res[(res$padj < alpha), ]
+sigtab = cbind(as(sigtab, "data.frame"), 
+               as(tax_table(ps.DeS)[rownames(sigtab), ], "matrix"))
+
+theme_set(theme_bw())
+sigtabgen = sigtab[ancom_CorResp$ASV,]
+# Phylum order
+x = tapply(sigtabgen$log2FoldChange, sigtabgen$domain, function(x) max(x))
+x = sort(x, TRUE)
+sigtabgen$domain = factor(as.character(sigtabgen$domain), levels=names(x))
+# Family order
+x = tapply(sigtabgen$log2FoldChange, sigtabgen$genus, function(x) max(x))
+x = sort(x, TRUE)
+
+mycolors = c("#E41A1C","#4A72A6","#48A462","#7E6E85","#EC83BA","#FFB716","#e6550d","#666666")
+
+sigtabgen$genus = factor(sigtabgen$genus, levels=c("Peptoniphilus","Lawsonella","Finegoldia","Dolosigranulum","Corynebacterium","Anaerococcus"))
+
+ggplot(sigtabgen, aes(y=genus, x=log2FoldChange, color = genus)) + 
+  geom_vline(xintercept = 0.0, color = "gray", size = 0.5) +
+  geom_point(size=2) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5)) +
+  xlab("Log 2 Fold Change") +
+  ylab("Genus") +
+  scale_color_manual(values = c("#e6550d","#EC83BA","#666666","#48A462","#4A72A6","#E41A1C")) + 
+  theme(legend.title =  element_blank()) +
+  scale_x_continuous(limits = c(-1, 1))
+  
+
+ggsave(file="~/BRAVE_Kids/Figures/DESeq2_respSX.PDF", g, width = 20, height = 12, units = "cm")
+
+write.csv(sigtabgen, "~/BRAVE_Kids/RespSympAnyDeseq.csv")
+```
+
+##Delete
+```{r}
+RespDF = sampleDF %>%
+  subset(., corona != "Negative")
+
+d = cbind(RespDF,otu_table(ps.Pos.r)[,c('1014','1017', '1030','1032','1060','1491','1535','1593', '1618')]) %>%
+  select(., '1014','1017', '1030','1032','1060','1491','1535','1593', '1618', PosBin) 
+
+d$ASV_1017 = d$`1017`
+d$ASV_1030 = d$`1030`
+
+dpos = d %>%
+  subset(., PosBin == "Yes")
+
+dneg = d %>%
+  subset(., PosBin == "No")
+
+wilcox.test(dpos$`1014`,dneg$`1014`)
+wilcox.test(dpos$`1017`,dneg$`1017`)
+wilcox.test(dpos$`1030`,dneg$`1030`)
+wilcox.test(dpos$`1032`,dneg$`1032`)
+wilcox.test(dpos$`1060`,dneg$`1060`)
+wilcox.test(dpos$`1491`,dneg$`1491`)
+wilcox.test(dpos$`1535`,dneg$`1535`)
+wilcox.test(dpos$`1593`,dneg$`1593`)
+wilcox.test(dpos$`1618`,dneg$`1618`)
+
+d = cbind(RespDF,otu_table(ps.Pos.r)[,c('1014','1017', '1030','1032','1060','1491','1535','1593', '1618')])
+
+wilcox.test(childPos$`1030`,childNeg$`1030`)
+
+model =aov(`1030` ~ PosBin * age, data = d)
+summary(model)
+coefficients(model)
+
+
+adolPos
+adolNeg
+
+YAPos
+YANeg
+
+
+```
 
