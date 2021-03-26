@@ -661,50 +661,9 @@ ggplot(f, aes(fill = tax, y=value, x=variable)) +
 theme(legend.text.align = 0)
 ```
 
-
-
-#ANCOM by corona
-```{r}
-meta_data <- data.frame(sample_data(ps.NP))
-meta_data$sampleID = rownames(meta_data)
-otu_data <- data.frame(otu_table(ps.NP))
-otu_id <- row.names(otu_data)
-otu_data <- data.frame(t(otu_table(ps.NP)))
-colnames(otu_data) <- otu_id
-
-feature_table = otu_data
-
-sample_var = "sampleID" 
-group_var = NULL
-out_cut = 0.05 
-zero_cut = 0.95 
-lib_cut = 1000 
-neg_lb = TRUE
-prepro = feature_table_pre_process(feature_table, meta_data, sample_var, group_var, out_cut, zero_cut, lib_cut, neg_lb)
-
-feature_table = prepro$feature_table # Preprocessed feature table
-meta_data = prepro$meta_data # Preprocessed metadata
-struc_zero = prepro$structure_zeros # Structural zero info
-
-main_var = "corona"
-p_adj_method = "BH"
-alpha = 0.05
-adj_formula = "age" 
-rand_formula = NULL
-res_cor = ANCOM(feature_table, meta_data, struc_zero, main_var, p_adj_method, alpha, adj_formula, rand_formula)
-
-res = res_cor$out %>%
-  subset(., detected_0.8 == TRUE) %>%
-  rename(ASV = taxa_id)
-
-write.csv(res, "~/BRAVE_Kids/ancom2_corona_0.95_final.csv")
-
-rm(adj_formula, alpha, group_var, lib_cut, main_var, neg_lb, otu_id, out_cut, p_adj_method, rand_formula, sample_var, struc_zero, zero_cut, feature_table, meta_data, otu_data, prepro)
-```
-
 #Figure 3A
 ```{r}
-ancom_CorPN = read.csv("~/BRAVE_Kids/ancom2_corona_0.95_final.csv")
+ancom_CorPN = read.csv("~/BRAVE_Kids/corona_ancom2_final.csv")
 
 ancom_CorPN$ASV = as.character(ancom_CorPN$ASV)
 
@@ -749,93 +708,11 @@ g=ggplot(d, aes(x = corona, y = value1, fill = corona)) +
 ggsave(file="~/BRAVE_Kids/FigurePDF/ancomPosNeg.PDF", g, width = 10, height = 16, units = "cm")
 ```
 
-#ANCOM by respiratory symptoms
-```{r}
-ps.NP.pos = subset_samples(ps.NP,sample_data(ps.NP)$corona != "Negative")
-
-meta_data <- data.frame(sample_data(ps.NP.pos))
-meta_data$sampleID = rownames(meta_data)
-otu_data <- data.frame(otu_table(ps.NP.pos))
-otu_id <- row.names(otu_data)
-otu_data <- data.frame(t(otu_table(ps.NP.pos)))
-colnames(otu_data) <- otu_id
-
-feature_table = otu_data
-
-sample_var = "sampleID" 
-group_var = "resp_sx_any"
-out_cut = 0.05 
-zero_cut = 0.95 
-lib_cut = 1000 
-neg_lb = TRUE
-prepro = feature_table_pre_process(feature_table, meta_data, sample_var, group_var, out_cut, zero_cut, lib_cut, neg_lb)
-
-feature_table = prepro$feature_table # Preprocessed feature table
-meta_data = prepro$meta_data # Preprocessed metadata
-struc_zero = prepro$structure_zeros # Structural zero info
-
-main_var = "resp_sx_any"
-p_adj_method = "BH"
-alpha = 0.05
-adj_formula = "age" 
-rand_formula = NULL
-res_cor = ANCOM(feature_table, meta_data, struc_zero, main_var, p_adj_method, alpha, adj_formula, rand_formula)
-
-res = res_cor$out %>%
-  subset(., detected_0.8 == TRUE) %>%
-  rename(ASV = taxa_id) %>%
-  subset(., W!="Inf")
-
-write.csv(res, "~/BRAVE_Kids/ancom2_resp_0.95_final.csv")
-
-rm(adj_formula, alpha, group_var, lib_cut, main_var, neg_lb, otu_id, out_cut, p_adj_method, rand_formula, sample_var, struc_zero, zero_cut, feature_table, meta_data, otu_data, prepro)
-```
-
-#ANCOM by age
-```{r}
-meta_data <- data.frame(sample_data(ps.NP))
-meta_data$sampleID = rownames(meta_data)
-otu_data <- data.frame(otu_table(ps.NP))
-otu_id <- row.names(otu_data)
-otu_data <- data.frame(t(otu_table(ps.NP)))
-colnames(otu_data) <- otu_id
-
-feature_table = otu_data
-
-sample_var = "sampleID" 
-group_var = "age_cat"
-out_cut = 0.05 
-zero_cut = 0.95 
-lib_cut = 1000 
-neg_lb = TRUE
-prepro = feature_table_pre_process(feature_table, meta_data, sample_var, group_var, out_cut, zero_cut, lib_cut, neg_lb)
-
-feature_table = prepro$feature_table # Preprocessed feature table
-meta_data = prepro$meta_data # Preprocessed metadata
-struc_zero = prepro$structure_zeros # Structural zero info
-
-main_var = "age"
-p_adj_method = "BH"
-alpha = 0.05
-adj_formula = "Group" 
-rand_formula = NULL
-res_cor = ANCOM(feature_table, meta_data, struc_zero, main_var, p_adj_method, alpha, adj_formula, rand_formula)
-
-res = res_cor$out %>%
-  subset(., detected_0.8 == TRUE) %>%
-  rename(ASV = taxa_id) %>%
-  subset(., W!="Inf")
-
-write.csv(res, "~/BRAVE_Kids/ancom2_age_0.95_final.csv")
-
-rm(adj_formula, alpha, group_var, lib_cut, main_var, neg_lb, otu_id, out_cut, p_adj_method, rand_formula, sample_var, struc_zero, zero_cut, feature_table, meta_data, otu_data, prepro)
-```
-
 #Figure 3B
 ```{r}
-ancom_CorResp = read.csv("~/BRAVE_Kids/ancom2_resp_0.95_final.csv")
+ancom_CorResp = read.csv("~/BRAVE_Kids/resp_ancom2_final.csv")
 
-ancom_age = read.csv("~/BRAVE_Kids/ancom2_age_0.95_final.csv")
+ancom_age = read.csv("~/BRAVE_Kids/age_ancom2_final.csv")
 
 #Same ASVs present, only showing those 9
 ancomR = ancom_age[ancom_CorResp$ASV,]
@@ -893,7 +770,7 @@ ggsave(file="~/BRAVE_Kids/FigurePDF/ancomRespSX.PDF", g, width = 20, height = 16
 
 #Figure 4B
 ```{r}
-ancom_age = read.csv("~/BRAVE_Kids/ancom2_age_0.95_final.csv")
+ancom_age = read.csv("~/BRAVE_Kids/age_ancom2_final.csv")
 
 sampleDF = sample_data(ps.NP.r) %>%
   data.frame(.)
@@ -960,6 +837,7 @@ g=ggplot(d3, aes(x=agebin, y=value1)) +
   theme_bw()+
   xlab("Age (years)")+
   ylab("Relative abundance") + 
+  
   facet_wrap(~ variable.x, ncol=3) +
   scale_y_continuous(breaks=c(0.000001,0.00001, 0.0001,0.001, 0.01,0.1, 1), trans = 'log')
 
@@ -1037,35 +915,6 @@ g=ggplot(d3, aes(x = agebin, y = value1, fill = corona)) +
 ggsave(file="~/BRAVE_Kids/FigurePDF/ancomCoronaAge.PDF", g, width = 15, height = 16, units = "cm")
 ```
 
-```{r}
-d = cbind(sampleDF,otu_table(ps.NP.r)[,c('1017', '1030')]) %>%
-  select(., '1017', '1030', age, corona) 
-
-d$ASV_1017 = d$`1017`
-d$ASV_1030 = d$`1030`
-
-dpos = d %>%
-  subset(., corona == "Positive")
-
-dneg = d %>%
-  subset(., corona == "Negative")
-
-wilcox.test(dpos$`1017`,dneg$`1017`)
-wilcox.test(dpos$`1030`,dneg$`1030`)
-
-cor.test(d$`1030`, d$age, method = "spearman")
-d$`1017`
-library(ggpubr)
-ggscatter(d, x = "age", y = "ASV_1017", 
-          add = "reg.line", conf.int = TRUE, 
-          cor.coef = TRUE, cor.method = "spearman",
-          xlab = "age", ylab = "ASV")
-
-ggscatter(d, x = "age", y = "ASV_1030", 
-          add = "reg.line", conf.int = TRUE, 
-          cor.coef = TRUE, cor.method = "spearman",
-          xlab = "age", ylab = "ASV")
-```
 #age summary stats
 ```{r}
 genusDF = as.data.frame(cbind(t(otu_table(ps.Genus, taxa_are_rows = FALSE)), tax_table(ps.Genus)))
@@ -1177,146 +1026,3 @@ f = f %>%
 
 write.csv(f, "~/BRAVE_Kids/SupplementalTable3.csv")
 ```
-
-
-#DESeq2 Pos vs. Negative
-```{r}
-library(DESeq2)
-filter <- phyloseq::genefilter_sample(ps.NP, filterfun_sample(function(x) x >= 1), A = 0.05*nsamples(ps.NP))
-
-ps.DeS <- prune_taxa(filter, ps.NP) %>%
-  transform_sample_counts(., function(x) x+1)
-
-#sample_data(ps.DeS)$corona <- as.factor(sample_data(ps.DeS)$corona)
-
-ds = phyloseq_to_deseq2(ps.DeS, ~ corona + age)
-sample_data(ps.DeS)
-dds = DESeq(ds, fitType = 'local')
-
-res = results(dds)
-res = res[order(res$padj, na.last=NA), ]
-alpha = 0.05
-sigtab = res[(res$padj < alpha), ]
-sigtab = cbind(as(sigtab, "data.frame"), 
-               as(tax_table(ps.DeS)[rownames(sigtab), ], "matrix"))
-
-theme_set(theme_bw())
-sigtabgen = sigtab[ancom_CorPN$ASV,]
-# Phylum order
-x = tapply(sigtabgen$log2FoldChange, sigtabgen$domain, function(x) max(x))
-x = sort(x, TRUE)
-sigtabgen$domain = factor(as.character(sigtabgen$domain), levels=names(x))
-# Family order
-x = tapply(sigtabgen$log2FoldChange, sigtabgen$genus, function(x) max(x))
-x = sort(x, TRUE)
-
-sigtabgen$genus = factor(as.character(sigtabgen$genus), levels=names(x))
-
-ggplot(sigtabgen, aes(y=genus, x=log2FoldChange, color=genus)) + 
-  geom_vline(xintercept = 0.0, color = "gray", size = 0.5) +
-  geom_point(size=2) + 
-  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5)) +
-  xlab("Log 2 Fold Change") +
-  ylab("Genus") + 
-  scale_color_manual(values = "#4A72A6") +
-  scale_x_continuous(limits = c(-1, 1)) 
-
-ggsave(file="~/BRAVE_Kids/Figures/DESeq2_corona.PDF", g, width = 20, height = 4, units = "cm")
-
-write.csv(sigtabgen, "~/BRAVE_Kids/RespSympAnyDeseq.csv")
-```
-
-```{r}
-library(DESeq2)
-
-filter <- phyloseq::genefilter_sample(ps.NP.pos, filterfun_sample(function(x) x >= 1), A = 0.05*nsamples(ps.NP.pos))
-
-ps.DeS <- prune_taxa(filter, ps.NP.pos) %>%
-  transform_sample_counts(., function(x) x+1)
-
-ds = phyloseq_to_deseq2(ps.DeS, ~ resp_sx_any + age)
-sample_data(ps.DeS)
-dds = DESeq(ds)
-
-res = results(dds)
-res = res[order(res$padj, na.last=NA), ]
-alpha = 0.05
-sigtab = res[(res$padj < alpha), ]
-sigtab = cbind(as(sigtab, "data.frame"), 
-               as(tax_table(ps.DeS)[rownames(sigtab), ], "matrix"))
-
-theme_set(theme_bw())
-sigtabgen = sigtab[ancom_CorResp$ASV,]
-# Phylum order
-x = tapply(sigtabgen$log2FoldChange, sigtabgen$domain, function(x) max(x))
-x = sort(x, TRUE)
-sigtabgen$domain = factor(as.character(sigtabgen$domain), levels=names(x))
-# Family order
-x = tapply(sigtabgen$log2FoldChange, sigtabgen$genus, function(x) max(x))
-x = sort(x, TRUE)
-
-mycolors = c("#E41A1C","#4A72A6","#48A462","#7E6E85","#EC83BA","#FFB716","#e6550d","#666666")
-
-sigtabgen$genus = factor(sigtabgen$genus, levels=c("Peptoniphilus","Lawsonella","Finegoldia","Dolosigranulum","Corynebacterium","Anaerococcus"))
-
-ggplot(sigtabgen, aes(y=genus, x=log2FoldChange, color = genus)) + 
-  geom_vline(xintercept = 0.0, color = "gray", size = 0.5) +
-  geom_point(size=2) + 
-  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5)) +
-  xlab("Log 2 Fold Change") +
-  ylab("Genus") +
-  scale_color_manual(values = c("#e6550d","#EC83BA","#666666","#48A462","#4A72A6","#E41A1C")) + 
-  theme(legend.title =  element_blank()) +
-  scale_x_continuous(limits = c(-1, 1))
-  
-
-ggsave(file="~/BRAVE_Kids/Figures/DESeq2_respSX.PDF", g, width = 20, height = 12, units = "cm")
-
-write.csv(sigtabgen, "~/BRAVE_Kids/RespSympAnyDeseq.csv")
-```
-
-##Delete
-```{r}
-RespDF = sampleDF %>%
-  subset(., corona != "Negative")
-
-d = cbind(RespDF,otu_table(ps.Pos.r)[,c('1014','1017', '1030','1032','1060','1491','1535','1593', '1618')]) %>%
-  select(., '1014','1017', '1030','1032','1060','1491','1535','1593', '1618', PosBin) 
-
-d$ASV_1017 = d$`1017`
-d$ASV_1030 = d$`1030`
-
-dpos = d %>%
-  subset(., PosBin == "Yes")
-
-dneg = d %>%
-  subset(., PosBin == "No")
-
-wilcox.test(dpos$`1014`,dneg$`1014`)
-wilcox.test(dpos$`1017`,dneg$`1017`)
-wilcox.test(dpos$`1030`,dneg$`1030`)
-wilcox.test(dpos$`1032`,dneg$`1032`)
-wilcox.test(dpos$`1060`,dneg$`1060`)
-wilcox.test(dpos$`1491`,dneg$`1491`)
-wilcox.test(dpos$`1535`,dneg$`1535`)
-wilcox.test(dpos$`1593`,dneg$`1593`)
-wilcox.test(dpos$`1618`,dneg$`1618`)
-
-d = cbind(RespDF,otu_table(ps.Pos.r)[,c('1014','1017', '1030','1032','1060','1491','1535','1593', '1618')])
-
-wilcox.test(childPos$`1030`,childNeg$`1030`)
-
-model =aov(`1030` ~ PosBin * age, data = d)
-summary(model)
-coefficients(model)
-
-
-adolPos
-adolNeg
-
-YAPos
-YANeg
-
-
-```
-
