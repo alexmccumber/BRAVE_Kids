@@ -8,3 +8,6 @@ Found in BRAVE_Kids_analysis.Rmd
 
 ## Metadata
 All associated metadata can be found in metadata_16sv2.csv
+
+## FASTQ files can be found:
+SRA Project: PRJNA703574
