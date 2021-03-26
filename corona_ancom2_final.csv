@@ -1,0 +1,3 @@
+"","ASV","domain","phylum","class","order","family","genus","species","W","detected_0.9","detected_0.8","DESeq2_log2FoldChange"
+"1","1017","Bacteria","Actinobacteriota","Actinobacteria","Corynebacteriales","Corynebacteriaceae","Corynebacterium","Corynebacterium;s",192,FALSE,TRUE,1.61412382480918
+"2","1030","Bacteria","Actinobacteriota","Actinobacteria","Corynebacteriales","Corynebacteriaceae","Corynebacterium","Corynebacterium;s",233,TRUE,TRUE,1.19041976763271
