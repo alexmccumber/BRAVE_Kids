@@ -1,7 +1,0 @@
-"","ASV","domain","phylum","class","order","family","genus","species","W","detected_0.9","detected_0.8","DESeq2_log2FoldChange"
-"1","1017","Bacteria","Actinobacteriota","Actinobacteria","Corynebacteriales","Corynebacteriaceae","Corynebacterium","Corynebacterium;s",215,TRUE,TRUE,3.11565191290626
-"2","1030","Bacteria","Actinobacteriota","Actinobacteria","Corynebacteriales","Corynebacteriaceae","Corynebacterium","Corynebacterium;s",227,TRUE,TRUE,1.90966637106073
-"3","1032","Bacteria","Actinobacteriota","Actinobacteria","Corynebacteriales","Corynebacteriaceae","Corynebacterium","Corynebacterium;s",199,FALSE,TRUE,0.238400968432118
-"4","1060","Bacteria","Actinobacteriota","Actinobacteria","Corynebacteriales","Corynebacteriaceae","Lawsonella","Lawsonella;s",203,FALSE,TRUE,-0.367002075305202
-"5","1582","Bacteria","Firmicutes","Clostridia","Peptostreptococcales-Tissierellales","Peptostreptococcales-Tissierellales;f","Anaerococcus","Anaerococcus;s",187,FALSE,TRUE,0.766655616514714
-"6","1618","Bacteria","Firmicutes","Clostridia","Peptostreptococcales-Tissierellales","Peptostreptococcales-Tissierellales;f","Peptoniphilus","Peptoniphilus;s",219,TRUE,TRUE,0.481827505831408
