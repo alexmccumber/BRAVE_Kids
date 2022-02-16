@@ -37,8 +37,9 @@ library(tidyverse)
 library(ggplot2)
 library(dplyr)
 library(compositions)
-#Need to download the ancom function before running
-source("~/BRAVE_Kids/ancom_v2.1.R")
+library(BiocManager)
+library(microbiome)
+library(mediation)
 ```
 
 ```{r}
@@ -57,7 +58,6 @@ fnRs = sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
 
 sample.names = sapply(strsplit(basename(fnFs),"_L001"), `[`,1)
 ```
-
 
 ```{r}
 plotQualityProfile(fnFs[1:20],aggregate = TRUE)
@@ -135,7 +135,6 @@ mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
 plotErrors(errF, nominalQ=TRUE)
 ```
 
-
 ```{r, making a sequence table}
 seqtab = makeSequenceTable(mergers)
 
@@ -161,31 +160,16 @@ head(track)
 colSums(track)
 ```
 
-#Run this if you need to download the silva dataset v138 for IDTaxa function
-```{bash, include = false}
-wget http://www2.decipher.codes/Classification/TrainingSets/SILVA_SSU_r138_2019.RData -P ./silvadb
+```{bash}
+wget https://static-content.springer.com/esm/art%3A10.1186%2Fs40168-020-00841-w/MediaObjects/40168_2020_841_MOESM2_ESM.fa -P ./eHOMD
 ```
 
 ```{r}
-dna <- DNAStringSet(getSequences(seqtab.nochim)) # Create a DNAStringSet from the ASVs
-
-load("~/BRAVE_Kids/silvadb/SILVA_SSU_r138_2019.RData")
-
-ids <- IdTaxa(dna, trainingSet, strand="top", processors=12, verbose=FALSE)
-
-ranks <- c("domain", "phylum", "class", "order", "family", "genus") # ranks of interest
-
-# Convert the output object of class "Taxa" to a matrix analogous to the output from assignTaxonomy
-taxid <- t(sapply(ids, function(x) {
-        m <- match(ranks, x$rank)
-        taxa <- x$taxon[m]
-        taxa[startsWith(taxa, "unclassified_")] <- NA
-        taxa
-}))
-colnames(taxid) <- ranks; rownames(taxid) <- getSequences(seqtab.nochim)
+taxtable <- assignTaxonomy(seqtab.nochim, "~/BRAVE_Kids/eHOMD/40168_2020_841_MOESM2_ESM.fa", multithread=T, minBoot=50)
 ```
 
 ##Creation of tree, need to run through python 2 (I think, I haven't been able to get this to work when I have python3 installed)
+
 ```{bash, make a tree with SEPP using gg backbone tree}
 wget  "https://raw.github.com/smirarab/sepp-refs/master/gg/sepp-package.tar.bz"
 
@@ -194,8 +178,6 @@ tar xvfj sepp-package.tar.bz
 cd sepp-package/sepp
 
 python setup.py config -c
-
-python setup.py install --user
 ```
 
 ```{r, make list of sequences in fasta file for tree making}
@@ -207,6 +189,11 @@ uniquesToFasta(uniques,fout = "~/BRAVE_Kids/seqs.fasta", ids=sequences)
 ```
 
 ```{bash}
+./sepp-package/run-sepp.sh sepp-package/test.frag test-gg
+```
+
+
+```{bash}
 ./sepp-package/run-sepp.sh seqs.fasta BRAVE
 ```
 
@@ -215,18 +202,15 @@ seq.tree = read.tree(file = "~/BRAVE_Kids/BRAVE_placement.tog.relabelled.tre") %
   keep.tip(., sequences)
 ```
 
-
 #Import metadata and make dataframe
 ```{r}
-metad = read_csv("~/BRAVE_Kids/metadata_16sv2.csv")
+metad = read_csv("~/BRAVE_Kids/metadata_070621.csv")
 
 rownames(metad) = str_remove_all(metad$brave_id, "-")
 
 metaDF = subset(metad, rownames(metad) %in% gsub("_.*","",sample.names))
 
 rownames(metaDF) = str_remove_all(metaDF$brave_id, "-")
-
-metaDF$X1=NULL
 
 rm(metad)
 ```
@@ -236,42 +220,76 @@ rm(metad)
 #need to change seqtab.nochim to have same sample names as metadata
 rownames(seqtab.nochim) = gsub("_.*","",rownames(seqtab.nochim))
 
+seqtab.nochim = as.data.frame(seqtab.nochim)
+
+taxtable <- as.matrix(taxtable)
+
+metaDF = as.data.frame(metaDF)
+
 ps = phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
                sample_data(metaDF), 
-               tax_table(taxid),
+               tax_table(taxtable),
               phy_tree(seq.tree))
 
-ps.Bact=subset_taxa(ps, domain=="Bacteria") 
+ps.Bact=subset_taxa(ps, Kingdom=="Bacteria") 
+ntaxa(ps.Bact)
 
-saveRDS(ps.Bact, "~/BRAVE_Kids/ps.RDS")
+# Remove ASVs assigned to reference phyla that are not known to be isolated from the aerodigestive tract
+ps.eHOMD <- subset_taxa(ps.Bact, Phylum!="Chlorobi" & Phylum!="Chloroflexi" & Phylum!="Cyanobacteria" & Phylum!="Gracilibacteria (GN02)" & Phylum!="Saccharibacteria (TM7)" & Phylum!="Absconditabacteria (SR1)" & Phylum!="WPPS-2")
+
+ntaxa(ps.eHOMD)
+total_reads <- sum(sample_sums(ps.eHOMD))
+# Total number of bacteria sequencing reads prior to contaminant removal
+
+saveRDS(ps.eHOMD, "~/BRAVE_Kids/ps.RDS")
 
 rm(ps)
 ```
 
 #Decontam 
 ```{r}
+ps.eHOMD = readRDS("~/BRAVE_Kids/ps.RDS")
+
 library("decontam")
-contamdf.freq = isContaminant(ps.Bact, method="frequency", conc = "dna", threshold = 0.1)
+
+dna <- Biostrings::DNAStringSet(taxa_names(ps.eHOMD))
+names(dna) <- taxa_names(ps.eHOMD)
+ps.eHOMD <- merge_phyloseq(ps.eHOMD, dna)
+taxa_names(ps.eHOMD) <- paste0("ASV", seq(ntaxa(ps.eHOMD)))
+
+contamdf.freq = isContaminant(ps.eHOMD, method="frequency", conc = "dna", threshold = 0.1) %>%
+  data.frame(.)
 
 hist(contamdf.freq$p)
 
 table(contamdf.freq$contaminant)
 
-#Identified 40 contaminant taxa in at 0.1
+#Identified 35 contaminant taxa in at 0.1
 #remove contaminant taxa
 
-ps.noncontam = prune_taxa(!contamdf.freq$contaminant, ps.Bact)
+ps.noncontam = prune_taxa(!contamdf.freq$contaminant, ps.eHOMD)
+
+cont.tax = ps.noncontam = prune_taxa(contamdf.freq$contaminant, ps.eHOMD)
 
 set.seed(42)
-plot_frequency(ps.Bact, taxa_names(ps.Bact)[sample(which(contamdf.freq$contaminant),4)], conc="dna") +
+plot_frequency(ps.eHOMD, taxa_names(ps.eHOMD)[sample(which(contamdf.freq$contaminant),)], conc="dna") +
     xlab("DNA Concentration")
+
+sampleDF = sample_data(ps.eHOMD) %>%
+  data.frame(.)
+
+TT=tax_table(cont.tax) %>%
+  data.frame(.) %>%
+  cbind(., sequence = refseq(cont.tax)) 
+
+write.csv(TT, "~/BRAVE_Kids/contaminantTaxTable.csv")
 ```
 
 ```{r}
 subset_samples(ps.noncontam, sample_data(ps.noncontam)$brave_id == "extractNEGctrl") %>%
   prune_species(speciesSums(.) > 0, .)
 
-#54 ASVs in extractNEGctrl
+#56 ASVs in extractNEGctrl
 
 subset_samples(ps.noncontam, sample_data(ps.noncontam)$brave_id == "PCRneg") %>%
   prune_species(speciesSums(.) > 0, .)
@@ -281,38 +299,40 @@ subset_samples(ps.noncontam, sample_data(ps.noncontam)$brave_id == "PCRneg") %>%
 
 #Remove contaminants ID'ed by decontam and remove ctrl and non-study samples
 ```{r, mesesage = FALSE}
-ps.noncontam = prune_taxa(!contamdf.freq$contaminant, ps.Bact) %>%
-  subset_samples(., sample_data(ps.noncontam)$sex != "NA") %>%
+ps.noncontam = prune_taxa(!contamdf.freq$contaminant, ps.eHOMD) 
+
+ps.NP = ps.noncontam %>% subset_samples(., sample_data(ps.noncontam)$corona != "NA" & sample_data(ps.noncontam)$method_np == "NP") %>%
   prune_samples(sample_sums(.)>=1000, .) %>%
   #transform_sample_counts(.,function(x) x/sum(x)) %>%
   prune_species(speciesSums(.) > 0, .) 
 
-ps.noncontam
+sample_names(ps.NP)
+
+sampleDF = sample_data(ps.NP) %>%
+  data.frame(.)
+
+ps.genus = tax_glom(ps.NP, taxrank = "Genus")
+
+TaxDF = as.data.frame(cbind(tax_table(ps.genus)))
+
+write.csv(TaxDF, "~/BRAVE_Kids/GenusDF.csv")
 
 saveRDS(ps.noncontam, "~/BRAVE_Kids/psBRAVE.RDS")
-
-# Number ASVs and store the exact sequences in the reference sequence slot - can access with refseq(ps)
-dna <- Biostrings::DNAStringSet(taxa_names(ps.noncontam))
-names(dna) <- taxa_names(ps.noncontam)
-phy.brave <- merge_phyloseq(ps.noncontam, dna)
-taxa_names(ps.noncontam) <- paste0(seq(ntaxa(ps.noncontam)))
-ps.noncontam
-remove(dna)
-```
-
-```{r}
-ps.noncontam = readRDS("~/BRAVE_Kids/psBRAVE.RDS")
-
-#Subset to NP only samples and remove Indeterminate COVID postiive/negative results
-ps.NP = subset_samples(ps.noncontam, sample_data(ps.noncontam)$method_np == "NP" & sample_data(ps.noncontam)$corona != "Indeterminate") %>%
-  prune_species(speciesSums(.) > 0, .) 
 
 ps.NP.r = transform_sample_counts(ps.NP,function(x) x/sum(x)) 
 
 saveRDS(ps.NP, "~/BRAVE_Kids/psNP.RDS")
+
+summary(sample_sums(ps.NP))
+
+table(sample_data(ps.NP)$group2)
+
+NP.pos = subset_samples(ps.NP, sample_data(ps.NP )$corona == "Positive")
+
+summary(sample_data(NP.pos)$timing_np_dx)
 ```
 
-```{r, include = FALSE}
+```{r}
 # Function to make matrix usable for vegan from phyloseq object
 vegan_otu <- function(physeq) {
     OTU <- otu_table(physeq)
@@ -322,9 +342,90 @@ vegan_otu <- function(physeq) {
     return(as(OTU, "matrix"))
 }
 ```
+# Initial Ordinations
+```{r, include=F}
+#CLR transformation
+y = microbiome::transform(ps.NP, "clr")
 
-#Code for Figures 1A and 1B and evaluate differences in shannon and chao1 diversity/richness
+ord = ordinate(y, method = "RDA", distance = "euclidean") %>%
+  plot_ordination(y, ., type="samples", axes = 1:3)
+
+sampleDF = sample_data(y) %>%
+  data.frame(.)
+
+sampleDF = sampleDF %>%
+    mutate(agebin = case_when(age < 2 ~ '0-2',
+                              age < 5 ~ '3-5',
+                              age < 8 ~ '6-8',
+                              age < 11 ~ '9-11',
+                              age < 14 ~ '12-14',
+                              age < 17 ~ '15-17',
+                              TRUE ~ '18-20'))
+
+sampleDF = sampleDF %>%
+    mutate(facet = case_when(agebin == '0-2' ~ '0-2 years',
+                              agebin == '3-5' ~ '3-5 years',
+                              agebin == '6-8' ~ '6-8 years',
+                              agebin == '9-11' ~ '9-11 years',
+                              agebin == '12-14' ~ '12-14 years',
+                              agebin == '15-17' ~ '15-17 years',
+                              TRUE ~ '18-20 years'))
+
+sampleDF$facet = factor(sampleDF$facet, levels = c('0-2 years','3-5 years','6-8 years','9-11 years','12-14 years','15-17 years','18-20 years'))
+
+sampleDF = sampleDF %>%
+    mutate(Group = case_when(corona == "Negative" ~ 'Negative',
+                              resp_sx_any == 1 ~ 'PosResp',
+                              TRUE ~ 'Pos_NoResp'))
+
+sampleDF = sampleDF %>%
+    mutate(Group1 = case_when(Group == 'Negative' ~ 'Negative',
+                              Group == 'PosResp' ~ 'Positve (respiratory symptoms)',
+                              Group == 'Pos_NoResp' ~ 'Positive (no respiratory symptoms)'))
+
+ordDF = cbind(sampleDF, PC1 = ord$data$PC1, PC2 = ord$data$PC2) 
+ordDF2=ordDF 
+
+ordDF = ordDF %>% 
+  dplyr::select(., PC1, PC2)
+
+ordDF2 = ordDF2 %>%
+  dplyr::select(., PC1, PC2, corona, Group1, facet)
+
+PermDF = data.frame(sample_data(y))
+BetaD=phyloseq::distance(y, method = "euclidean") 
+```
+
+### After CLR transformation, there was no effect from PERMANVOA by corona, only age
 ```{r}
+#permanova by corona by age, only significant by age (using CLR transform data)
+set.seed(77)
+adonis(BetaD~corona*age, permutations = 999, data=PermDF)
+
+#faceted biplot of samples by age
+ggplot(data = ordDF, aes(x = PC1, y = PC2)) +
+  geom_point(data=ordDF, alpha=0.05) + 
+  geom_point(data = ordDF2, aes(color = corona), alpha=0.7) + 
+  facet_wrap(~ facet, ncol=4) +
+  scale_color_manual(values = c("darkslategray4", "#BF812D")) + 
+  theme_bw() +
+  xlab("PC1 (9.3%)") + 
+  ylab("PC2 (6.5%)") +
+  labs(color = "SARS-CoV-2 status")+ 
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.1))
+
+#graph of group2 ordination
+subset_samples(y, sample_data(y)$corona == "Positive") %>%
+  ordinate(., method = "RDA", distance = "euclidean") %>%
+  plot_ordination(y, ., type="samples", color = "resp_sx_any") +
+  theme_bw()
+```
+
+#Code for Figures 1A and 1B and evaluate differences in shannon and observed diversity/richness
+```{r}
+sampleDF = sample_data(ps.NP) %>%
+  data.frame(.)
+
 sampleDF = sampleDF %>%
     mutate(agebin = case_when(age < 2 ~ '0-2',
                               age < 5 ~ '3-5',
@@ -340,138 +441,113 @@ Shannon = estimate_richness(ps.NP, measures = "Shannon") %>%
 Shannon$agebin = factor(Shannon$agebin, levels = c('0-2','3-5','6-8','9-11','12-14','15-17','18-20'))
 
 sampleDF = sampleDF %>%
-    mutate(Group1 = case_when(Group == 'Negative' ~ 'Negative',
-                              Group == 'PosResp' ~ 'Positve (respiratory SX)',
-                              Group == 'Pos_NoResp' ~ 'Positive (no respiratory SX)'))
+    mutate(Group1 = case_when(group2 == 'NEG' ~ 'Negative',
+                              group2 == 'POS_RESP_SX' ~ 'Positve (respiratory SX)',
+                              group2 == 'POS_ASX' ~ 'Positive (no respiratory SX)'))
 
-ggplot(Shannon, aes(x=agebin, y=Shannon)) +
-  geom_point(aes(color=Group1), alpha = 0.3) +
-  scale_color_manual(values=c("darkslategray4", "mediumorchid4","#BF812D")) +
-  stat_summary(aes(y=Shannon, group = Group1, color = Group1), fun.y = mean, geom = "line")+
+summary(Shannon$Shannon)
+
+#normally distributed
+shapiro.test(Shannon$Shannon)
+
+
+subset(Shannon, corona == "Positive") %>%
+  dplyr::select(Shannon) %>%
+  summary(.)
+```
+
+```{r}
+#only significant by age
+model = aov(Shannon ~ corona * age, Shannon)
+summary(model)
+
+subset(Shannon, corona == "Positive") %>%
+  aov(Shannon ~ group2 * age, .) %>%
+  summary(.)
+
+Shannon = Shannon %>%
+    mutate(Group1 = case_when(group2 == 'NEG' ~ 'Negative',
+                              group2 == 'POS_RESP_SX' ~ 'Positve (respiratory SX)',
+                              group2 == 'POS_ASX' ~ 'Positive (no respiratory SX)'))
+
+ggplot(Shannon, aes(Group1, Shannon, fill = Group1)) +
+  geom_boxplot() +
+  expand_limits(y=0)  +
+  scale_fill_manual(values = c("darkslategray4","mediumorchid4", "#BF812D"))+
+  theme_bw() +
+  ylab("Shannon Diversity") +
+  xlab("SARS-CoV-2 status")+
+  theme(legend.position = "none")
+
+#Plot showing shannon diversity by age
+a=ggplot(Shannon, aes(x=age, y=Shannon)) +
+  geom_point(alpha = 0.3) + 
+  geom_smooth(method='lm') +
   theme_bw()+
   xlab("Age (years)")+
   ylab("Shannon diversity") + 
   labs(color = "SARS-CoV-2 status") +
-  scale_y_continuous(limits = c(0,4)) + 
+  scale_y_continuous(limits = c(0,3)) + 
   theme(legend.position = "none")
 
-Chao = estimate_richness(ps.NP, measures = "Chao1") %>%
+Observed = estimate_richness(ps.NP, measures = "Observed") %>%
   cbind(., sampleDF, by = "names") 
 
-Chao$agebin = factor(Chao$agebin, levels = c('0-2','3-5','6-8','9-11','12-14','15-17','18-20'))
-
-ggplot(Chao, aes(x=agebin, y=Chao1)) +
-  geom_point(aes(color=Group1), alpha = 0.3) +
-  scale_color_manual(values=c("darkslategray4", "mediumorchid4","#BF812D")) +
-  stat_summary(aes(y=Chao1, group = Group1, color = Group1), fun.y = mean, geom = "line")+
+b=ggplot(Observed, aes(x=age, y=Observed)) +
+  geom_point(alpha = 0.3) + 
+  geom_smooth(method='lm') +
   theme_bw()+
   xlab("Age (years)")+
-  ylab("Chao1 richness") + 
+  ylab("Number of unique ASVs") + 
   labs(color = "SARS-CoV-2 status") +
-  scale_y_continuous(limits = c(0,250)) + 
+  scale_y_continuous(limits = c(0,200)) + 
   theme(legend.position = "none")
 
-summary(Chao$Chao1)
+p <- ggarrange(a, b,  
+                    labels = c("A", "B"),
+                    ncol = 2)
+p
 
-summary(Shannon$Shannon)
+ggsave(file="~/BRAVE_Kids/Figures_Final/Figure1.png", p, width = 25, height = 10, units = "cm")
 
-shapiro.test(Shannon$Shannon)
+#Observed taxa values are not normally distributed, so need to perform transformation
+shapiro.test(Observed$Observed)
 
-model = lm(Shannon ~ age, data = Shannon)
+summary(Observed$Observed)
+
+Observed$logObserved = log(Observed$Observed)
+
+#now normally distributed
+shapiro.test(Observed$logObserved)
+
+#significant by corona and age:corona (not age)
+model = aov(logObserved ~ age*corona, data = Observed)
 summary(model)
 
-model = aov(Shannon ~ corona + age, Shannon)
-summary(model)
+subset(Observed, corona == "Negative") %>%
+  dplyr::select(logObserved) %>%
+  summary(.)
 
-#chao values are not normally distributed, so need to perform transformation
-shapiro.test(Chao$Chao1)
-
-Chao$logChao = log(Chao$Chao1)
-
-#log chao1 values are normally distributed 
-shapiro.test(Chao$logChao) #p = 0.33
-
-model = lm(logChao ~ age+Group, data = Chao)
-summary(model)
-
-fit = aov(logChao ~ corona+age, data = Chao)
-summary(fit)
-
-model = aov(logChao ~ Group*age, data = Chao)
-summary(model)
-```
-
-#Code for Figure 1C
-```{r}
-set.seed(6)
-
-ord = ordinate(ps.NP, method = "NMDS", distance = "bray", trymax = 1000)
-
-#converged at run 467
-
-ord$stress # 0.238
-
-sampleDF = sample_data(ps.NP.r) %>%
-  data.frame(.)
-
-sampleDF$agebin = factor(sampleDF$agebin, levels = c('0-2','3-5','6-8','9-11','12-14','15-17','18-20'))
-
-sampleDF = sampleDF %>%
-    mutate(facet = case_when(agebin == '0-2' ~ '0-2 years',
-                              agebin == '3-5' ~ '3-5 years',
-                              agebin == '6-8' ~ '6-8 years',
-                              agebin == '9-11' ~ '9-11 years',
-                              agebin == '12-14' ~ '12-14 years',
-                              agebin == '15-17' ~ '15-17 years',
-                              TRUE ~ '18-20 years'))
-
-sampleDF$facet = factor(sampleDF$facet, levels = c('0-2 years','3-5 years','6-8 years','9-11 years','12-14 years','15-17 years','18-20 years'))
-
-sampleDF = sampleDF %>%
-    mutate(Group1 = case_when(Group == 'Negative' ~ 'Negative',
-                              Group == 'PosResp' ~ 'Positve (respiratory symptoms)',
-                              Group == 'Pos_NoResp' ~ 'Positive (no respiratory symptoms)'))
-
-sample_data(ps.NP)$Group1 = sampleDF$Group1
-
-ordDF = cbind(sampleDF, ord$points)
-ordDF2=ordDF
-ordDF$agebin=NULL
-ordDF$facet=NULL
-
-p=ggplot(data = ordDF, aes(x = MDS1, y = MDS2)) +
-  geom_point(data=ordDF, alpha=0.05) + 
-  geom_point(data = ordDF2, aes(color = Group1), alpha=0.7) + 
-  facet_wrap(~ facet, ncol=4) +
-  scale_color_manual(values = c("darkslategray4", "mediumorchid4","#BF812D")) + 
+ggplot(Observed, aes(corona, logObserved, fill = corona)) +
+  geom_boxplot() +
+  expand_limits(y=0)  +
+  scale_fill_manual(values = c("darkslategray4", "#BF812D"))+
   theme_bw() +
-  xlab("NMDS1") + 
-  ylab("NMDS2") +
-  labs(color = "SARS-CoV-2 status")+ 
-  scale_y_continuous(labels = scales::number_format(accuracy = 0.1))
+  scale_y_continuous(limits = c(3,5.5)) +
+  ylab("Number of unique species") +
+  xlab("SARS-CoV-2 status")+
+  theme(legend.position = "none")
 
-PermDF = data.frame(sample_data(ps.NP))
-
-BetaD=vegdist(vegan_otu(ps.NP), "bray")
-
-#permanova by age
-adonis(BetaD~age, permutations = 999, data=PermDF)
-
-anosim(BetaD, PermDF$agebin, permutations = 999, distance = "bray",
-    parallel = getOption("mc.cores"))
-
-#look at age + covid (positive/negative) status
-PermDF = data.frame(sample_data(ps.NP))
-
-BetaD=vegdist(vegan_otu(ps.NP), "bray")
-
-adonis(BetaD~age+corona, permutations = 999, data=PermDF)
-
+subset(Observed, corona == "Positive") %>%
+  aov(logObserved ~ group2 * age, .) %>%
+  summary(.)
 ```
 
-#Code to generate Figure 2
-```{r}
+# Code to generate Figure 2, composition of microbiome by age
+```{r, echo=F, warning=F}
 #create age bins and lots of long code to make mean abundance profiles
+
+ps.NP.r = transform_sample_counts(ps.NP,function(x) x/sum(x))
 
 sampleDF = sample_data(ps.NP.r) %>%
   data.frame(.)
@@ -487,20 +563,20 @@ sampleDF = sampleDF %>%
 
 sample_data(ps.NP.r)$agebin = sampleDF$agebin
 
-ps.Genus = tax_glom(ps.NP.r, taxrank = "genus") 
+ps.Genus = tax_glom(ps.NP.r, taxrank = "Genus") 
 
 psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$agebin == '0-2')
 
 genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
 
-genusDF$domain = NULL
-genusDF$phylum=NULL
-genusDF$class=NULL
-genusDF$order=NULL
-genusDF$family=NULL
-rownames(genusDF) = genusDF$genus
-genusDF$genus=NULL
-genusDF$species = NULL
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
 genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
 
 genusDF$C1 = rowMeans(genusDF)
@@ -511,14 +587,14 @@ psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$agebin == '3-5')
 
 genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
 
-genusDF$domain = NULL
-genusDF$phylum=NULL
-genusDF$class=NULL
-genusDF$order=NULL
-genusDF$family=NULL
-rownames(genusDF) = genusDF$genus
-genusDF$genus=NULL
-genusDF$species = NULL
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
 genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
 
 genusDF$C1 = rowMeans(genusDF)
@@ -529,14 +605,14 @@ psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$agebin == '6-8')
 
 genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
 
-genusDF$domain = NULL
-genusDF$phylum=NULL
-genusDF$class=NULL
-genusDF$order=NULL
-genusDF$family=NULL
-rownames(genusDF) = genusDF$genus
-genusDF$genus=NULL
-genusDF$species = NULL
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
 genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
 
 genusDF$C1 = rowMeans(genusDF)
@@ -547,14 +623,14 @@ psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$agebin == '9-11')
 
 genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
 
-genusDF$domain = NULL
-genusDF$phylum=NULL
-genusDF$class=NULL
-genusDF$order=NULL
-genusDF$family=NULL
-rownames(genusDF) = genusDF$genus
-genusDF$genus=NULL
-genusDF$species = NULL
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
 genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
 
 genusDF$C1 = rowMeans(genusDF)
@@ -565,14 +641,14 @@ psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$agebin == '12-14')
 
 genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
 
-genusDF$domain = NULL
-genusDF$phylum=NULL
-genusDF$class=NULL
-genusDF$order=NULL
-genusDF$family=NULL
-rownames(genusDF) = genusDF$genus
-genusDF$genus=NULL
-genusDF$species = NULL
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
 genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
 
 genusDF$C1 = rowMeans(genusDF)
@@ -583,14 +659,14 @@ psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$agebin == '15-17')
 
 genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
 
-genusDF$domain = NULL
-genusDF$phylum=NULL
-genusDF$class=NULL
-genusDF$order=NULL
-genusDF$family=NULL
-rownames(genusDF) = genusDF$genus
-genusDF$genus=NULL
-genusDF$species = NULL
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
 genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
 
 genusDF$C1 = rowMeans(genusDF)
@@ -601,14 +677,14 @@ psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$agebin == '18-20')
 
 genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
 
-genusDF$domain = NULL
-genusDF$phylum=NULL
-genusDF$class=NULL
-genusDF$order=NULL
-genusDF$family=NULL
-rownames(genusDF) = genusDF$genus
-genusDF$genus=NULL
-genusDF$species = NULL
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
 genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
 
 genusDF$C1 = rowMeans(genusDF)
@@ -632,7 +708,7 @@ fig$tax = rownames(fig)
 
 fig[10,9] = "Other"
 
-fig = select(fig, -Avg) %>%
+fig = dplyr::select(fig, -Avg) %>%
   dplyr::rename('0-2' = AvgDF1,
                 '3-5' = AvgDF2,
                 '6-8' = AvgDF3,
@@ -645,137 +721,407 @@ library(reshape2)
 f = melt(fig) 
 library(RColorBrewer)
 
-mycolors = c("#E41A1C","#4A72A6","#48A462","#7E6E85","#EC83BA","#FFB716","#e6550d","#B75F49","#5ab4ac","#666666")
+mycolors = c("#4A72A6","#E41A1C","#48A462","#7E6E85","#EC83BA","#FFB716","#e6550d","#B75F49","#5ab4ac","#666666")
 
-f$tax = factor(f$tax, levels=c("Anaerococcus","Corynebacterium","Dolosigranulum","Fusobacterium","Lawsonella","Moraxella", "Peptoniphilus", "Staphylococcus","Streptococcus","Other"))
+f$tax = factor(f$tax, levels=c("Corynebacterium","Dolosigranulum","Fusobacterium","Haemophilus","Lawsonella","Moraxella", "Peptoniphilus", "Staphylococcus","Streptococcus","Other"))
 
-
-ggplot(f, aes(fill = tax, y=value, x=variable)) +
+m=ggplot(f, aes(fill = tax, y=value, x=variable)) +
   geom_bar(position="stack", stat="identity", color = "black", size = 0.25) +
-  scale_fill_manual(values = mycolors, labels = c(expression(italic("Anaerococcus")),expression(italic("Corynebacterium")),expression(italic("Dolosigranulum")),expression(italic("Fusobacterium")),expression(italic("Lawsonella")),expression(italic("Moraxella")), expression(italic("Peptoniphilus")), expression(italic("Staphylococcus")),expression(italic("Streptococcus")),"Other")) +
+  scale_fill_manual(values = mycolors, labels = c(expression(italic("Corynebacterium")),expression(italic("Dolosigranulum")),expression(italic("Fusobacterium")),expression(italic("Haemophilus")),expression(italic("Lawsonella")),expression(italic("Moraxella")), expression(italic("Peptoniphilus")), expression(italic("Staphylococcus")),expression(italic("Streptococcus")),"Other")) +
   xlab("Age (years)") +
   ylab("Mean relative abundance") +
   labs(fill = "Genera") +
   theme_minimal() +
   scale_y_continuous(limits = c(0,1), expand = c(0, 0))+
 theme(legend.text.align = 0)
+
+ggsave("~/BRAVE_Kids/Figures_Final/Figure2.PDF", m, width = 15, height = 10, units = "cm")
 ```
 
-#Figure 3A
+# Generate biotypes for Figure 3
+```{r, include = F}
+#Aggregate at genus level and drop NA reads for the distance and clustering
+ps.Genus= tax_glom(ps.NP, taxrank = "Genus") %>%
+  transform_sample_counts(.,function(x) x/sum(x)) %>%
+  subset_taxa(., Genus!= "NA") 
+
+DistType = t(as.data.frame(vegan_otu(ps.Genus)))
+
+data.dist = vegdist(vegan_otu(ps.Genus), method = "bray")
+
+pam.clustering=function(x,k) { # x is a distance matrix and k the number of clusters
+                         require(cluster)
+                         cluster = as.vector(pam(as.dist(x), k, diss=TRUE)$clustering)
+                         return(cluster)
+                        }
+
+#See how many clusters is ideal (range from 1 to 20)
+nclusters=NULL
+
+for (k in 1:20) { 
+		if (k==1) {
+			nclusters[k]=NA 
+		} else {
+			data.cluster_temp=pam.clustering(data.dist, k)
+			nclusters[k]=index.G1(t(DistType), data.cluster_temp,  d = data.dist,
+			centrotypes = "medoids")
+		}
+	}
+```
+
+### After aggregating by genus, find ideal number of clusters (7) and then make them
 ```{r}
-ancom_CorPN = read.csv("~/BRAVE_Kids/corona_ancom2_final.csv")
+#Stop after this plot and see how many clusters you have
+plot(nclusters, type="h", xlab="k clusters", ylab="CH index")
+```
 
-ancom_CorPN$ASV = as.character(ancom_CorPN$ASV)
+```{r, include=F}
+#Set new number of clusters = to k based on above plot
+data.cluster=pam.clustering(data.dist, k=7)
 
-sampleDF = sample_data(ps.NP.r) %>%
-  data.frame(.)
+nclusters = index.G1(t(DistType), data.cluster, d = data.dist, centrotypes = "medoids")
 
-corDF = sampleDF %>%
-  select(., corona)
+#look at number to see if it is highest average (or could change mean to median)
+obs.silhouette=mean(silhouette(data.cluster, data.dist)[,3])
 
-t=as.data.frame(ps.NP.r@tax_table@.Data[ancom_CorPN$ASV,]) %>%
-  select(., 'genus')
+obs.pcoa=dudi.pco(data.dist, scannf=F, nf=3)
+```
 
-d=otu_table(ps.NP.r)[,ancom_CorPN$ASV] %>%
-  t(.) %>%
-  as.data.frame(.) 
-  
-d1=cbind(d, t) %>%
-  mutate(., var = paste(genus, " ", "(ASV", " ", rownames(.), ")", sep = "")) %>%
-  select(., -genus) 
-  
-rownames(d1) = NULL
+```{r, warning=F}
+#PCOA of clusters
+s.class(obs.pcoa$li, fac=as.factor(data.cluster), grid=T,  col = c(1:7))
 
-d=tibble::column_to_rownames(d1,var = "var") %>%
-  t(.) %>%
-  as.data.frame(.) %>%
-  merge(., corDF, by = 0) %>%
-  select(., -Row.names) %>%
-  melt(., id.vars = "corona")
+p = cbind(obs.pcoa$li,data.cluster)
 
-d$value1 = d$value + 1E-6
+p$data.cluster = as.factor(p$data.cluster)
 
-g=ggplot(d, aes(x = corona, y = value1, fill = corona)) +
-  geom_boxplot(show.legend = F) +
-  expand_limits(y=0)  +
-  scale_fill_manual(values = c("darkslategray4", "cornflowerblue"))+
+o=ggplot(data = p, aes(x = A1, y = A2)) +
+  geom_point(data = p, aes(color = data.cluster), alpha=0.7) + 
+  #facet_wrap(~ facet, ncol=4) +
+  scale_color_manual(values = c("#4A72A6","#48A462","#7E6E85","#EC83BA","#FFB716","#e6550d","#5ab4ac")) + 
   theme_bw() +
-  facet_wrap(~ variable, ncol=1) +
-  ylab("Relative abundance") +
-  xlab("SARS-CoV-2 status") +
-  scale_y_continuous(breaks=c(0.000001,0.00001, 0.0001,0.001, 0.01,0.1, 1), trans = 'log') 
+  stat_ellipse(aes(color = data.cluster)) +
+  stat_stars(aes(color = data.cluster), show.legend = T) +
+  xlab("PC1 (8.5%)") + 
+  ylab("PC2 (6.7%)") +
+  labs(color = "Microbiome Profile")+ 
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.1))
 
-ggsave(file="~/BRAVE_Kids/FigurePDF/ancomPosNeg.PDF", g, width = 10, height = 16, units = "cm")
-```
+sample_data(ps.Genus)$cluster = as.factor(data.cluster)
 
-#Figure 3B
-```{r}
-ancom_CorResp = read.csv("~/BRAVE_Kids/resp_ancom2_final.csv")
-
-ancom_age = read.csv("~/BRAVE_Kids/age_ancom2_final.csv")
-
-#Same ASVs present, only showing those 9
-ancomR = ancom_age[ancom_CorResp$ASV,]
-
-ancom_CorResp$ASV = as.character(ancom_CorResp$ASV)
-
-sampleDF = sample_data(ps.NP.r) %>%
+sampleDF = sample_data(ps.Genus) %>%
   data.frame(.)
 
-sampleDF = sampleDF %>%
-    mutate(PosBin = case_when(Group == 'Negative' ~ 'Negative',
-                              Group == 'PosResp' ~ 'Yes',
-                              Group == 'Pos_NoResp' ~ 'No'))
+#permanova by corona, age and cluster
+set.seed(77)
+adonis(BetaD~corona*age*cluster, permutations = 999, data=sampleDF)
 
-RespDF = sampleDF %>%
-  select(., PosBin)
+dispr <- vegan::betadisper(BetaD, sampleDF$corona)
+dispr
 
-ps.Pos.r = subset_samples(ps.NP.r, sample_data(ps.NP.r)$corona == "Positive")
+boxplot(dispr, main = "", xlab = "")
+permutest(dispr)
 
-t=as.data.frame(ps.Pos.r@tax_table@.Data[ancom_CorResp$ASV,]) %>%
-  select(., 'genus')
+sumDat = as.data.frame(sample_data(ps.Genus))
 
-d=otu_table(ps.Pos.r)[,ancom_CorResp$ASV] %>%
-  t(.) %>%
-  as.data.frame(.) 
-  
-d1=cbind(d, t) %>%
-  mutate(., var = paste(genus, " ", "(ASV", " ", rownames(.), ")", sep = "")) %>%
-  select(., -genus) 
-  
-rownames(d1) = NULL
+#age by cluster
+ggplot(sumDat, aes(x=cluster, y=age)) +
+  geom_boxplot(fill='lightgrey') +
+  xlab('Cluster') + 
+  ylab('Age (Years)') +
+  theme_bw()
 
-d=tibble::column_to_rownames(d1,var = "var") %>%
-  t(.) %>%
-  as.data.frame(.) %>%
-  merge(., RespDF, by = 0) %>%
-  select(., -Row.names) %>%
-  melt(., id.vars = "PosBin")
+Shannon = estimate_richness(ps.Genus, measures = "Shannon")%>%
+  cbind(., sampleDF, by = "names")
 
-d$value1 = d$value + 1E-6
+ggplot(Shannon, aes(x=cluster, y=Shannon)) +
+  geom_boxplot(fill='lightgrey') +
+  xlab('Cluster') + 
+  ylab('Shannon Diversity') +
+  theme_bw()
 
-g=ggplot(d, aes(x = PosBin, y = value1, fill = PosBin)) +
-  geom_boxplot(show.legend = F) +
-  expand_limits(y=0)  +
-  scale_fill_manual(values = c("mediumorchid4","#BF812D"))+
-  theme_bw() +
-  facet_wrap(~ variable, ncol=3) +
-  ylab("Relative abundance") +
-  xlab("Respiratory symptoms") +
-  scale_y_continuous(breaks=c(0.000001,0.00001, 0.0001,0.001, 0.01,0.1, 1), trans = 'log')
+#only significant by age
+model = aov(age ~ cluster, Shannon)
+summary(model)
+kruskal.test(age ~ cluster, Shannon)
 
-
-ggsave(file="~/BRAVE_Kids/FigurePDF/ancomRespSX.PDF", g, width = 20, height = 16, units = "cm")
+TukeyHSD(model)
 ```
 
-#Figure 4B
-```{r}
-ancom_age = read.csv("~/BRAVE_Kids/age_ancom2_final.csv")
+### Summary data by cluster
+```{r, warning=F, echo=F}
+Shannon$Observed = Observed$Observed
 
-sampleDF = sample_data(ps.NP.r) %>%
+Shannon = Shannon %>%
+    mutate(Covid = case_when(corona == "Positive" ~ 1,
+                              TRUE ~ 0))
+
+Shannon$cluster2 <- replace(Shannon$cluster,Shannon$cluster == 7, 6)
+
+Shannon$cluster2
+
+clusterSum = Shannon %>%
+  dplyr::select(age, Observed, Shannon, cluster2, Covid) %>%
+  group_by(., cluster2) %>%
+  summarise(median_shannon = median(Shannon),
+            FirstQ_shannon = quantile(Shannon, 0.25),
+            ThirdQ_shannon = quantile(Shannon, 0.75),
+            median_observed = median(Observed), 
+            FirstQ_observed = quantile(Observed, 0.25),
+            ThirdQ_observed = quantile(Observed, 0.75),
+            median_age = median(age),
+            FirstQ_age = quantile(age, 0.25),
+            ThirdQ_age = quantile(age, 0.75),
+            positive = sum(Covid)/length(Covid)*100) %>%
+  mutate_if(is.numeric, round, digits=3)
+
+clusterSum2 = Shannon %>%
+  subset(., corona == "Positive") %>%
+  dplyr::select(age, Observed, Shannon, cluster2, Covid, resp_sx_any) %>%
+  group_by(., cluster2) %>%
+  summarise(Pos_SX = sum(resp_sx_any)/length(resp_sx_any)*100) %>%
+  mutate_if(is.numeric, round, digits=3)
+
+clusterSum = left_join(clusterSum, clusterSum2, by = "cluster2")
+
+kable(clusterSum, caption = "Cluster summary table")
+
+Shannon %>%
+  dplyr::count(sex, cluster)
+
+Shannon %>%
+  dplyr::count(race, cluster)
+
+Shannon %>%
+  dplyr::count(obesity, cluster) 
+
+Shannon %>%
+  dplyr::count(asthma, cluster) 
+
+Shannon %>%
+  dplyr::count(smoking_home, cluster)
+
+Shannon %>%
+  dplyr::count(abx_30d, cluster)
+
+Shannon %>%
+  dplyr::count(probx_30d, cluster)
+
+Shannon %>%
+  dplyr::count(sex, cluster)
+
+Shannon %>%
+  dplyr::count(corona, cluster)
+
+Shannon %>%
+  dplyr::count(resp_sx_any, cluster)
+
+Shannon %>%
+  subset(corona == "Positive") %>%
+  dplyr::count(resp_sx_any, cluster)
+Shannon
+kruskal.test(age ~ group2, Shannon)
+chisq.test(table(Shannon$sex,Shannon$group2))
+fisher.test(table(Shannon$race,Shannon$group2))
+chisq.test(table(Shannon$asthma,Shannon$group2))
+chisq.test(table(Shannon$obesity,Shannon$group2))
+chisq.test(table(Shannon$smoking_home,Shannon$group2))
+fisher.test(table(Shannon$abx_30d,Shannon$group2))
+fisher.test(table(Shannon$probx_30d,Shannon$group2))
+
+subset(Shannon, corona == "Positive") %>%
+  kruskal.test(resp_sx_any ~ cluster, .)
+```
+
+# Sample composition by cluster
+```{r, echo=F}
+ps.Genus= tax_glom(ps.NP, taxrank = "Genus") %>%
+  transform_sample_counts(.,function(x) x/sum(x)) %>%
+  subset_taxa(., Genus!= "NA") 
+
+sample_data(ps.Genus)$cluster = as.factor(data.cluster)
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$cluster == 1)
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF1 = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$cluster == 2)
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF2 = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$cluster == 3)
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF3 = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$cluster == 4)
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF4 = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$cluster == 5)
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF5 = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$cluster == 6)
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF6 = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$cluster == 7)
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF7 = genusDF$C1 
+
+AvgDF = cbind(AvgDF1, AvgDF2, AvgDF3, AvgDF4, AvgDF5, AvgDF6, AvgDF7) %>%
   data.frame(.)
 
-sampleDF = sampleDF %>%
+rownames(AvgDF) = rownames(genusDF)
+
+AvgDF$Avg = rowMeans(AvgDF)
+
+fig = top_n(AvgDF, 9, Avg) 
+
+Other = 1 - colSums(fig)
+
+fig = rbind(fig, Other)
+
+fig$tax = rownames(fig)
+
+fig[10,9] = "Other"
+
+fig = dplyr::select(fig, -Avg) %>%
+  dplyr::rename('1' = AvgDF1,
+                '2' = AvgDF2,
+                '3' = AvgDF3,
+                '4' = AvgDF4,
+                '5' = AvgDF5,
+                '6' = AvgDF6,
+                '7' = AvgDF7)
+
+library(reshape2)
+f = melt(fig) 
+library(RColorBrewer)
+
+mycolors = c("#4A72A6","#E41A1C","#48A462","#7E6E85","#EC83BA","#FFB716","#e6550d","#B75F49","#5ab4ac","#666666")
+
+f$tax = factor(f$tax, levels=c("Corynebacterium","Dolosigranulum","Fusobacterium","Haemophilus","Lawsonella","Moraxella", "Prevotella", "Staphylococcus","Streptococcus","Other"))
+
+
+x=ggplot(f, aes(fill = tax, y=value, x=variable)) +
+  geom_bar(position="stack", stat="identity", color = "black", size = 0.25) +
+  scale_fill_manual(values = mycolors, labels = c(expression(italic("Corynebacterium")),expression(italic("Dolosigranulum")),expression(italic("Fusobacterium")),expression(italic("Haemophilus")),expression(italic("Lawsonella")),expression(italic("Moraxella")), expression(italic("Prevotella")), expression(italic("Staphylococcus")),expression(italic("Streptococcus")),"Other")) +
+  xlab("Microbiome profile") +
+  ylab("Mean relative abundance") +
+  labs(fill = "Genera") +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0,1), expand = c(0, 0))+
+theme(legend.text.align = 0)
+
+p <- ggarrange(o, x,  
+                    labels = c("A", "B"),
+                    ncol = 2)
+
+ggsave("~/BRAVE_Kids/Figures_Final/ClusterRelAb.PDF", p, width = 30, height = 10, units = "cm")
+```
+
+# Proportion of cluster by age, note that cluster 3 has higher % positive rate and increases with age
+```{r, echo = F}
+Shannon = Shannon %>%
     mutate(agebin = case_when(age < 2 ~ '0-2',
                               age < 5 ~ '3-5',
                               age < 8 ~ '6-8',
@@ -784,149 +1130,184 @@ sampleDF = sampleDF %>%
                               age < 17 ~ '15-17',
                               TRUE ~ '18-20'))
 
-sampleDF$agebin = factor(sampleDF$agebin, levels = c('0-2','3-5','6-8','9-11','12-14','15-17','18-20'))
+PropDF = Shannon %>%
+  dplyr::select(agebin, cluster) %>%
+  group_by(., agebin)
 
-sampleDF = sampleDF %>%
-    mutate(PosBin = case_when(Group == 'Negative' ~ 'Negative',
-                              Group == 'PosResp' ~ 'Yes',
-                              Group == 'Pos_NoResp' ~ 'No'))
+PropDF$value = "1"
 
-RespDF = sampleDF %>%
-  select(., agebin, PosBin)
+PropDF <- PropDF %>% 
+  group_by(agebin, cluster) %>% 
+  summarise(count = n()) %>% 
+  mutate(perc = count/sum(count))
 
-t=as.data.frame(ps.NP.r@tax_table@.Data[ancom_CorResp$ASV,]) %>%
-  select(., 'genus')
+PropDF$agebin = factor(PropDF$agebin, levels = c('0-2','3-5','6-8','9-11','12-14','15-17','18-20'))
 
-d=otu_table(ps.NP.r)[,ancom_CorResp$ASV] %>%
-  t(.) %>%
-  as.data.frame(.) 
-  
-d1=cbind(d, t) %>%
-  mutate(., var = paste(genus, " ", "(ASV", " ", rownames(.), ")", sep = "")) %>%
-  select(., -genus) 
-  
-rownames(d1) = NULL
-
-d=tibble::column_to_rownames(d1,var = "var") %>%
-  t(.) %>%
-  as.data.frame(.) %>%
-  merge(., RespDF, by = 0) %>%
-  select(., -Row.names, PosBin) %>%
-  melt(., id.vars = "agebin")
-
-d2=tibble::column_to_rownames(d1,var = "var") %>%
-  t(.) %>%
-  as.data.frame(.) %>%
-  merge(., RespDF, by = 0) %>%
-  select(., -Row.names, agebin) %>%
-  melt(., id.vars = "PosBin")
-
-d3 = merge(d, d2, by= 0) %>%
-  select(., agebin, PosBin, value.x, variable.x)
-
-d3$value.x = as.numeric(d3$value.x)
-
-d3$value1 = d3$value.x + 1E-6
-
-d3 = subset(d3, d3$variable.x != "PosBin" & d3$PosBin != "Negative")
-
-g=ggplot(d3, aes(x=agebin, y=value1)) +
-  geom_boxplot(aes(fill=PosBin)) +
-  scale_fill_manual(values=c("mediumorchid4","#BF812D"), name = "Respiratory symptoms") +
-  #stat_summary(aes(y=value1, group = GroupBin, color = GroupBin), fun.y = mean, geom = "line")+
-  theme_bw()+
-  xlab("Age (years)")+
-  ylab("Relative abundance") + 
-  
-  facet_wrap(~ variable.x, ncol=3) +
-  scale_y_continuous(breaks=c(0.000001,0.00001, 0.0001,0.001, 0.01,0.1, 1), trans = 'log')
-
-ggsave(file="~/BRAVE_Kids/FigurePDF/ancomPosNeg_age.PDF", g, width = 30, height = 16, units = "cm")
-```
-
-#Figure 4A
-```{r}
-ancom_CorPN = read.csv("~/BRAVE_Kids/ancom2_corona_0.95_final.csv")
-
-ancom_CorPN$ASV = as.character(ancom_CorPN$ASV)
-
-sampleDF = sample_data(ps.NP.r) %>%
-  data.frame(.)
-
-sampleDF = sampleDF %>%
-    mutate(agebin = case_when(age < 2 ~ '0-2',
-                              age < 5 ~ '3-5',
-                              age < 8 ~ '6-8',
-                              age < 11 ~ '9-11',
-                              age < 14 ~ '12-14',
-                              age < 17 ~ '15-17',
-                              TRUE ~ '18-20'))
-
-sampleDF$agebin = factor(sampleDF$agebin, levels = c('0-2','3-5','6-8','9-11','12-14','15-17','18-20'))
-
-corDF = sampleDF %>%
-  select(., corona, agebin)
-
-t=as.data.frame(ps.NP.r@tax_table@.Data[ancom_CorPN$ASV,]) %>%
-  select(., 'genus')
-
-d=otu_table(ps.NP.r)[,ancom_CorPN$ASV] %>%
-  t(.) %>%
-  as.data.frame(.) 
-  
-d1=cbind(d, t) %>%
-  mutate(., var = paste(genus, " ", "(ASV", " ", rownames(.), ")", sep = "")) %>%
-  select(., -genus) 
-  
-rownames(d1) = NULL
-
-d=tibble::column_to_rownames(d1,var = "var") %>%
-  t(.) %>%
-  as.data.frame(.) %>%
-  merge(., corDF, by = 0) %>%
-  select(., -Row.names, agebin) %>%
-  melt(., id.vars = "agebin")
-
-d2=tibble::column_to_rownames(d1,var = "var") %>%
-  t(.) %>%
-  as.data.frame(.) %>%
-  merge(., corDF, by = 0) %>%
-  select(., -Row.names) %>%
-  melt(., id.vars = "corona")
-
-d3 = merge(d, d2, by= 0) %>%
-  select(., agebin, corona, value.x, variable.x) %>%
-  subset(., variable.x != "corona")
-
-d3$value.x = as.numeric(d3$value.x)
-
-d3$value1 = d3$value.x + 1E-6
-
-g=ggplot(d3, aes(x = agebin, y = value1, fill = corona)) +
-  geom_boxplot() +
-  expand_limits(y=0)  +
-  scale_fill_manual(values = c("darkslategray4", "cornflowerblue"), name = "SARS-CoV-2 status")+
-  theme_bw() +
-  facet_wrap(~ variable.x, ncol = 1) +
-  ylab("Relative abundance") +
+ggplot(PropDF, aes(fill = cluster, y=perc, x=agebin)) + 
+  geom_bar(position="stack", stat="identity", color = "black", size = 0.25) +
   xlab("Age (years)") +
-  scale_y_continuous(breaks=c(0.000001,0.00001, 0.0001,0.001, 0.01,0.1, 1), trans = 'log')
+  ylab("Percentage of cluster by age group") +
+  theme_minimal() +
+  #scale_y_continuous(limits = c(0,1), expand = c(0, 0))+
+  theme(legend.text.align = 0)
+```
 
-ggsave(file="~/BRAVE_Kids/FigurePDF/ancomCoronaAge.PDF", g, width = 15, height = 16, units = "cm")
+# Chi-square test p > 0.05 for corona
+```{r}
+Shannon$corona = as.factor(Shannon$corona)
+
+Shannon$cluster = sizes <- relevel(Shannon$cluster, "1")
+
+Shannon$cluster
+
+table(Shannon$cluster, Shannon$corona)
+
+x = table(Shannon$cluster, Shannon$corona)
+
+clusterNum = 1:7
+
+for (i in clusterNum){
+x2 = rbind(colSums(x) - x[i,], x[i,])
+
+p = fisher.test(x2)
+
+print(p)
+}
+```
+
+```{r}
+PosDF = Shannon %>%
+  subset(., corona == "Positive")
+
+table(PosDF$cluster, PosDF$resp_sx_any)
+
+x = table(PosDF$cluster, PosDF$resp_sx_any)
+
+clusterNum = 1:7
+
+for (i in clusterNum){
+x2 = rbind(colSums(x) - x[i,], x[i,])
+
+p = fisher.test(x2)
+
+print(p)
+}
+
+#logit for cluster
+x = glm(resp_sx_any ~ cluster + age, data = PosDF, family = "binomial")
+
+summary(x)
+
+#with an interaction term
+x = glm(resp_sx_any ~ cluster * age, data = PosDF, family = "binomial")
+
+summary(x)
+
+p.adjust(0.009625, "bonferroni", 7)
+```
+
+```{r}
+library(gjam)
+
+sampleDF = sample_data(ps.NP) %>%
+  data.frame(.)
+
+sampleDF$cluster = as.character(data.cluster)
+
+sampleDF$corona <- factor(sampleDF$corona)
+
+filter <- phyloseq::genefilter_sample(ps.NP, filterfun_sample(function(x) x >= 1), A = 0.05*nsamples(ps.NP))
+
+ps.PF <- prune_taxa(filter, ps.NP)
+
+sample = otu_table(ps.PF) %>%
+  as.data.frame(.) 
+
+sample$other = sample_sums(ps.NP) - rowSums(sample)
+
+ml   <- list(ng = 30000, burnin = 10000, typeNames = 'CC')
+
+form <- as.formula( ~ corona*age)
+
+set.seed(77)
+ageXcoronagjam  <- gjam(form, xdata = sampleDF, ydata = sample, modelList = ml)
+
+DF = ageXcoronagjam$parameters$betaTable %>%
+  subset(., sig95 == "*") 
+
+DF$names = rownames(DF)
+  
+DFRespSX = DF %>%
+  tidyr::separate(names, c("ASV", "Parameter"), sep = "_") #%>%
+  #subset(., Parameter != "intercept" & Parameter != "age")
+
+names = DFRespSX$ASV
+names = unique(names)
+Tax = as.data.frame(cbind(tax_table(ps.PF)))
+Tax$ASV = rownames(Tax)
+DFRespSX = left_join(DFRespSX, Tax, by = "ASV")
+
+write.csv(DFRespSX, "~/BRAVE_Kids/coronagjam.csv")
+```
+
+```{r}
+ps.Pos = subset_samples(ps.NP, sample_data(ps.NP)$corona == "Positive")
+
+y = microbiome::transform(ps.Pos, "clr")
+
+PermDF = data.frame(sample_data(y))
+
+BetaD=phyloseq::distance(y, method = "euclidean") 
+
+#permanova 
+set.seed(77)
+adonis(BetaD~resp_sx_any*age, permutations = 999, data=PermDF)
+
+sampleDF = sample_data(ps.Pos) %>%
+  data.frame(.)
+
+sampleDF$symptoms_any <- factor( sampleDF$symptoms_any )
+
+filter <- phyloseq::genefilter_sample(ps.Pos, filterfun_sample(function(x) x >= 1), A = 0.05*nsamples(ps.Pos))
+
+ps.PF <- prune_taxa(filter, ps.Pos)
+
+sample = otu_table(ps.PF) %>%
+  as.data.frame(.) 
+
+sample$other = sample_sums(ps.Pos) - rowSums(sample)
+
+ml   <- list(ng = 30000, burnin = 10000, typeNames = 'PA')
+
+sampleDF = sampleDF %>%
+  dplyr::rename('AnySX' = symptoms_any)
+
+form <- as.formula( ~ AnySX*age)
+
+set.seed(77)
+ageXcoronaPA  <- gjam(form, xdata = sampleDF, ydata = sample, modelList = ml)
+
+DF = ageXcoronaPA$parameters$betaTable %>%
+  subset(., sig95 == "*") 
+
+DF$names = rownames(DF)
+
+DF = DF %>%
+  tidyr::separate(names, c("ASV", "Parameter"), sep = "_")
 ```
 
 #age summary stats
 ```{r}
 genusDF = as.data.frame(cbind(t(otu_table(ps.Genus, taxa_are_rows = FALSE)), tax_table(ps.Genus)))
 
-genusDF$domain = NULL
-genusDF$phylum=NULL
-genusDF$class=NULL
-genusDF$order=NULL
-genusDF$family=NULL
-rownames(genusDF) = genusDF$genus
-genusDF$genus=NULL
-genusDF$species = NULL
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
 genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
 
 
@@ -943,7 +1324,6 @@ medDF = countDF %>%
 
 rownames(medDF) = medDF$agebin
 
-
 #######begin function 
 summarystat = function(agerange){
 countDF2 = countDF %>%
@@ -951,14 +1331,14 @@ countDF2 = countDF %>%
   summary(.) %>%
   data.frame(.) %>%
   separate(., Freq, c("variable", "value") ,sep = ":")%>%
-  select(., -Var1)  %>%
+  dplyr::select(., -Var1)  %>%
   subset(., Var2 != "   agebin") %>%
   dcast(., Var2 ~ variable)
 
 rownames(countDF2) = countDF2$Var2
   
 countDF2 = mutate_all(countDF2, as.numeric) %>%
-  select(., -Var2) %>%
+  dplyr::select(., -Var2) %>%
   mutate_if(., is.numeric, round, digits=3) 
   
 countDF2$IQR = paste(countDF2$`1st Qu.`, countDF2$`3rd Qu.`, sep = "-")
@@ -966,7 +1346,7 @@ countDF2$IQR = paste(countDF2$`1st Qu.`, countDF2$`3rd Qu.`, sep = "-")
 countDF2$agerange = paste(countDF2$`Median `, countDF2$IQR, sep = ", ") 
 
 countDF2 = countDF2 %>%
-  select(., agerange) 
+  dplyr::select(., agerange) 
 }
 
 
@@ -988,7 +1368,7 @@ propcount = function(agerange){
 countDF2 = countDF %>%
   subset(., agebin == agerange) %>%
   data.frame(.) %>%
-  select(., -agebin) %>%
+  dplyr::select(., -agebin) %>%
   mutate_all(function(x) ifelse(x>0, 1, 0)) %>%
   t(.) %>%
   data.frame(.)
@@ -1025,4 +1405,497 @@ f = f %>%
   rename(., f1 = "0-2 years", f2 = "3-5 years", f3 = "6-8 years", f4 = "9-11 years", f5 = "12-14 years", f6 = "15-17 years", f7 = "18-20 years")
 
 write.csv(f, "~/BRAVE_Kids/SupplementalTable3.csv")
+```
+
+
+```{r}
+ASVlist = c("ASV336", "ASV339", "ASV692", "ASV1283")
+
+propDF = otu_table(ps.NP.pos.r)[,ASVlist] %>%
+  data.frame(.) %>%
+  cbind(., sampleDFPos)
+
+propDF = propDF %>%
+    mutate(respSX = case_when(resp_sx_any == 1 ~ 'Yes',
+                              TRUE ~ 'No'))
+
+propDF = propDF %>%
+    mutate(agebin = case_when(age < 2 ~ '0-2',
+                              age < 5 ~ '3-5',
+                              age < 8 ~ '6-8',
+                              age < 11 ~ '9-11',
+                              age < 14 ~ '12-14',
+                              age < 17 ~ '15-17',
+                              TRUE ~ '18-20'))
+
+propDF$agebin = factor(propDF$agebin, levels = c('0-2','3-5','6-8','9-11','12-14','15-17','18-20'))
+
+propDF2 = propDF %>%
+  dplyr::select(., ASV336, agebin, resp_sx_any) %>%
+  group_by(., agebin, resp_sx_any) %>%
+  summarize(mean_size = mean(ASV336, na.rm = TRUE))
+
+d1 = propDF2 %>%
+  subset(., resp_sx_any == "1")
+
+d2 = propDF2 %>%
+  subset(., resp_sx_any == "0")
+
+d3 = cbind("yes" = d1$mean_size,"no" =d2$mean_size) %>%
+  data.frame(.)
+
+d3$diff = d3$yes - d3$no
+d3$agebin = d2$agebin
+
+Direction = c("Negative", "Negative", "Negative", "Negative", "Positive", "Positive", "Negative")
+
+d3=cbind(d3,Direction)
+
+a=ggplot(data=d3, aes(x=agebin, y=diff, fill = Direction)) +
+  geom_bar(stat="identity") +
+  geom_abline(aes(intercept = -0.0807, slope = 0.00682*2.5, color="Resp SX"), show.legend = F, alpha = 0.5, size = 1.5) +
+  #geom_abline(aes(intercept = 0.0576, slope = -0.00624*2.5,color="No Resp SX"), alpha = 0.5, size = 1.5,show.legend = T) +
+  theme_bw()+
+  ggtitle(expression(paste("ASV336", " (", italic("Moraxella lincolnii"), ")", sep = " ")), ) +
+  labs(colour="") +
+  scale_y_continuous(limits = c(-0.1, 0.15)) +
+  xlab("Age Category") +
+  ylab("Difference in mean relative abundance") +
+  scale_colour_manual(values="mediumorchid4") +
+  theme(plot.title = element_text(hjust = 0.5, size = 20), legend.position = "none") + 
+  scale_fill_manual( values = c("Positive" = "#636363", "Negative" = "#bdbdbd"))
+
+#mediumorchid4, #BF812D
+
+0.0576-10*0.00624
+
+a
+
+ggsave("~/BRAVE_Kids/Figures_Final/ASV336.PDF", a, width = 20, height = 16, units = "cm")
+
+##############################################################
+propDF2 = propDF %>%
+  dplyr::select(., ASV336, ASV339, agebin, resp_sx_any) %>%
+  group_by(., agebin, resp_sx_any) %>%
+  summarize(mean_size = mean(ASV339, na.rm = TRUE))
+
+d1 = propDF2 %>%
+  subset(., resp_sx_any == "1")
+
+d2 = propDF2 %>%
+  subset(., resp_sx_any == "0")
+
+d3 = cbind("yes" = d1$mean_size,"no" =d2$mean_size) %>%
+  data.frame(.)
+
+d3$diff = d3$yes - d3$no
+d3$agebin = d2$agebin
+
+b=ggplot(data=d3, aes(x=agebin, y=diff)) +
+  geom_bar(stat="identity") +
+  geom_abline(aes(intercept = -0.01800, slope = 0.00150*2.5, color="Resp SX"), show.legend = T, alpha = 0.5, size = 1.5) +
+  #geom_abline(aes(intercept = 0.0576, slope = -0.00624*2.5,color="No Resp SX"), alpha = 0.5, size = 1.5,show.legend = T) +
+  theme_bw()+
+  ggtitle("ASV 339") +
+  labs(colour="") +
+  scale_y_continuous(limits = c(-0.02, 0.02)) +
+  xlab("Age Category") +
+  ylab("Mean Rel Abund Diff (Symp - Asymp)") +
+  scale_colour_manual(values="mediumorchid4") + 
+  theme(legend.position = "none")
+
+##############################################################
+propDF2 = propDF %>%
+  dplyr::select(., ASV692, agebin, resp_sx_any) %>%
+  group_by(., agebin, resp_sx_any) %>%
+  summarize(mean_size = mean(ASV692, na.rm = TRUE))
+
+d1 = propDF2 %>%
+  subset(., resp_sx_any == "1")
+
+d2 = propDF2 %>%
+  subset(., resp_sx_any == "0")
+
+d3 = cbind("yes" = d1$mean_size,"no" =d2$mean_size) %>%
+  data.frame(.)
+
+d3$diff = d3$yes - d3$no
+d3$agebin = d2$agebin
+
+c=ggplot(data=d3, aes(x=agebin, y=diff)) +
+  geom_bar(stat="identity") +
+  geom_abline(aes(intercept = 0.02380, slope = -0.00151*2.5, color="Resp SX"), show.legend = T, alpha = 0.5, size = 1.5) +
+  #geom_abline(aes(intercept = 0.0576, slope = -0.00624*2.5,color="No Resp SX"), alpha = 0.5, size = 1.5,show.legend = T) +
+  theme_bw()+
+  ggtitle("ASV 692") +
+  labs(colour="") +
+  scale_y_continuous(limits = c(-0.03, 0.055)) +
+  xlab("Age Category") +
+  ylab("Mean Rel Abund Diff (Symp - Asymp)") +
+  scale_colour_manual(values="mediumorchid4") + 
+  theme(legend.position = "none")
+
+##############################################################
+propDF2 = propDF %>%
+  dplyr::select(., ASV1283, ASV339, agebin, resp_sx_any) %>%
+  group_by(., agebin, resp_sx_any) %>%
+  summarize(mean_size = mean(ASV1283, na.rm = TRUE))
+
+d1 = propDF2 %>%
+  subset(., resp_sx_any == "1")
+
+d2 = propDF2 %>%
+  subset(., resp_sx_any == "0")
+
+d3 = cbind("yes" = d1$mean_size,"no" =d2$mean_size) %>%
+  data.frame(.)
+
+d3$diff = d3$yes - d3$no
+d3$agebin = d2$agebin
+
+d=ggplot(data=d3, aes(x=agebin, y=diff)) +
+  geom_bar(stat="identity") +
+  geom_abline(aes(intercept = 0.03760, slope = -0.00407*2.5, color="Resp SX"), show.legend = T, alpha = 0.5, size = 1.5) +
+  #geom_abline(aes(intercept = 0.0576, slope = -0.00624*2.5,color="No Resp SX"), alpha = 0.5, size = 1.5,show.legend = T) +
+  theme_bw()+
+  ggtitle("ASV 1283") +
+  labs(colour="") +
+  scale_y_continuous(limits = c(-0.1, 0.08)) +
+  xlab("Age Category") +
+  ylab("Mean Rel Abund Diff (Symp - Asymp)") +
+  scale_colour_manual(values="#BF812D") + 
+  theme(legend.position = "none")
+
+figure <- ggarrange(a, b, c,  
+                    labels = c("A", "B", "C"),
+                    ncol = 3)
+
+figure
+```
+
+```{r}
+ASVlist = c("ASV306", "ASV629", "ASV712", "ASV1095", "ASV1163", "ASV1165", "ASV1581")
+
+propDF = otu_table(ps.NP.r)[,ASVlist] %>%
+  data.frame(.) %>%
+  cbind(., sampleDF)
+
+propDF = propDF %>%
+    mutate(agebin = case_when(age < 2 ~ '0-2',
+                              age < 5 ~ '3-5',
+                              age < 8 ~ '6-8',
+                              age < 11 ~ '9-11',
+                              age < 14 ~ '12-14',
+                              age < 17 ~ '15-17',
+                              TRUE ~ '18-20'))
+
+propDF$agebin = factor(propDF$agebin, levels = c('0-2','3-5','6-8','9-11','12-14','15-17','18-20'))
+
+propDF2 = propDF %>%
+  dplyr::select(., ASV306, agebin, corona) %>%
+  group_by(., agebin, corona) %>%
+  summarize(mean_size = mean(ASV306, na.rm = TRUE))
+
+d1 = propDF2 %>%
+  subset(., corona == "Positive")
+
+d2 = propDF2 %>%
+  subset(., corona == "Negative")
+
+d3 = cbind("Positive" = d1$mean_size,"Negative" =d2$mean_size) %>%
+  data.frame(.)
+
+d3$diff = d3$Positive - d3$Negative
+d3$agebin = d2$agebin
+
+Direction = c("Positive", "Negative", "Negative", "Negative", "Positive", "Negative", "Negative")
+
+d3 = cbind(d3, Direction)
+
+b=ggplot(data=d3, aes(x=agebin, y=diff, fill = Direction)) +
+  geom_bar(stat="identity") +
+  geom_abline(aes(intercept = -0.10800, slope = 0.00534*2.5, color="Positive"), show.legend = F, alpha = 0.5, size = 1.5) +
+  #geom_abline(aes(intercept = 0.0576, slope = -0.00624*2.5,color="No Resp SX"), alpha = 0.5, size = 1.5,show.legend = T) +
+  theme_bw()+
+  ggtitle(expression(paste("ASV306", " (", italic("Moraxella nonliquefaciens"), ")", sep = " ")), ) +
+  labs(colour="") +
+  scale_y_continuous(limits = c(-0.25, 0.25)) +
+  xlab("Age Category") +
+  ylab("Difference in mean relative abundance") +
+  scale_colour_manual(values="#BF812D") + 
+  scale_fill_manual( values = c("Positive" = "#636363", "Negative" = "#bdbdbd"))+
+  theme(plot.title = element_text(hjust = 0.5, size = 20), legend.position = "none")
+
+figure <- ggarrange(b, a,
+                    labels = c("A", "B"),
+                    ncol = 2)
+
+ggsave("~/BRAVE_Kids/Figures_Final/ASV306.PDF", figure, width = 30, height = 16, units = "cm")
+
+#######################################
+
+propDF2 = propDF %>%
+  dplyr::select(., ASV629, agebin, corona) %>%
+  group_by(., agebin, corona) %>%
+  summarize(mean_size = mean(ASV629, na.rm = TRUE))
+
+d1 = propDF2 %>%
+  subset(., corona == "Positive")
+
+d2 = propDF2 %>%
+  subset(., corona == "Negative")
+
+d3 = cbind("Positive" = d1$mean_size,"Negative" =d2$mean_size) %>%
+  data.frame(.)
+
+d3$diff = d3$Positive - d3$Negative
+d3$agebin = d2$agebin
+
+b=ggplot(data=d3, aes(x=agebin, y=diff)) +
+  geom_bar(stat="identity") +
+  geom_abline(aes(intercept = -0.02180, slope = 0.00167*2.5, color="Positive"), show.legend = T, alpha = 0.5, size = 1.5) +
+  #geom_abline(aes(intercept = 0.0576, slope = -0.00624*2.5,color="No Resp SX"), alpha = 0.5, size = 1.5,show.legend = T) +
+  theme_bw()+
+  ggtitle("ASV 629") +
+  labs(colour="") +
+  scale_y_continuous(limits = c(-0.04, 0.01)) +
+  xlab("Age Category") +
+  ylab("Mean Rel Abund Diff (Pos - Neg)") +
+  scale_colour_manual(values="#BF812D") + 
+  theme(legend.position = "none")
+
+#######################################
+
+propDF2 = propDF %>%
+  dplyr::select(., ASV712, agebin, corona) %>%
+  group_by(., agebin, corona) %>%
+  summarize(mean_size = mean(ASV712, na.rm = TRUE))
+
+d1 = propDF2 %>%
+  subset(., corona == "Positive")
+
+d2 = propDF2 %>%
+  subset(., corona == "Negative")
+
+d3 = cbind("Positive" = d1$mean_size,"Negative" =d2$mean_size) %>%
+  data.frame(.)
+
+d3$diff = d3$Positive - d3$Negative
+d3$agebin = d2$agebin
+
+c=ggplot(data=d3, aes(x=agebin, y=diff)) +
+  geom_bar(stat="identity") +
+  geom_abline(aes(intercept = -0.01610, slope = 0.00149*2.5, color="Positive"), show.legend = T, alpha = 0.5, size = 1.5) +
+  #geom_abline(aes(intercept = 0.0576, slope = -0.00624*2.5,color="No Resp SX"), alpha = 0.5, size = 1.5,show.legend = T) +
+  theme_bw()+
+  ggtitle("ASV 712") +
+  labs(colour="") +
+  scale_y_continuous(limits = c(-0.05, 0.01)) +
+  xlab("Age Category") +
+  ylab("Mean Rel Abund Diff (Pos - Neg)") +
+  scale_colour_manual(values="#BF812D") + 
+  theme(legend.position = "none")
+
+#######################################
+
+propDF2 = propDF %>%
+  dplyr::select(., ASV1095, agebin, corona) %>%
+  group_by(., agebin, corona) %>%
+  summarize(mean_size = mean(ASV1095, na.rm = TRUE))
+
+d1 = propDF2 %>%
+  subset(., corona == "Positive")
+
+d2 = propDF2 %>%
+  subset(., corona == "Negative")
+
+d3 = cbind("Positive" = d1$mean_size,"Negative" =d2$mean_size) %>%
+  data.frame(.)
+
+d3$diff = d3$Positive - d3$Negative
+d3$agebin = d2$agebin
+
+d=ggplot(data=d3, aes(x=agebin, y=diff)) +
+  geom_bar(stat="identity") +
+  geom_abline(aes(intercept = 0.02170, slope = -0.00262*2.5, color="Positive"), show.legend = T, alpha = 0.5, size = 1.5) +
+  #geom_abline(aes(intercept = 0.0576, slope = -0.00624*2.5,color="No Resp SX"), alpha = 0.5, size = 1.5,show.legend = T) +
+  theme_bw()+
+  ggtitle("ASV 1095") +
+  labs(colour="") +
+  scale_y_continuous(limits = c(-0.04, 0.02)) +
+  xlab("Age Category") +
+  ylab("Mean Rel Abund Diff (Pos - Neg)") +
+  scale_colour_manual(values="#BF812D") + 
+  theme(legend.position = "none")
+
+#######################################
+
+propDF2 = propDF %>%
+  dplyr::select(., ASV1163, agebin, corona) %>%
+  group_by(., agebin, corona) %>%
+  summarize(mean_size = mean(ASV1163, na.rm = TRUE))
+
+d1 = propDF2 %>%
+  subset(., corona == "Positive")
+
+d2 = propDF2 %>%
+  subset(., corona == "Negative")
+
+d3 = cbind("Positive" = d1$mean_size,"Negative" =d2$mean_size) %>%
+  data.frame(.)
+
+d3$diff = d3$Positive - d3$Negative
+d3$agebin = d2$agebin
+
+e=ggplot(data=d3, aes(x=agebin, y=diff)) +
+  geom_bar(stat="identity") +
+  geom_abline(aes(intercept = 0.09030, slope = -0.00432*2.5, color="Positive"), show.legend = F, alpha = 0.5, size = 1.5) +
+  ggtitle(expression(paste("ASV1163", " (", italic("Corynebacterium propinquum"), ")", sep = " ")), ) +
+  theme_bw() +
+  labs(colour="") +
+  scale_y_continuous(limits = c(-0.1, 0.15)) +
+  xlab("Age Category") +
+  ylab("Difference in mean relative abundance") +
+  scale_colour_manual(values="#BF812D") +
+  theme(plot.title = element_text(hjust = 0.5, size = 20), legend.position = "none")
+
+#######################################
+
+propDF2 = propDF %>%
+  dplyr::select(., ASV1165, agebin, corona) %>%
+  group_by(., agebin, corona) %>%
+  summarize(mean_size = mean(ASV1165, na.rm = TRUE))
+
+d1 = propDF2 %>%
+  subset(., corona == "Positive")
+
+d2 = propDF2 %>%
+  subset(., corona == "Negative")
+
+d3 = cbind("Positive" = d1$mean_size,"Negative" =d2$mean_size) %>%
+  data.frame(.)
+
+d3$diff = d3$Positive - d3$Negative
+d3$agebin = d2$agebin
+
+f=ggplot(data=d3, aes(x=agebin, y=diff)) +
+  geom_bar(stat="identity") +
+  geom_abline(aes(intercept = -0.03300, slope = 0.00347*2.5, color="Positive"), show.legend = T, alpha = 0.5, size = 1.5) +
+  #geom_abline(aes(intercept = 0.0576, slope = -0.00624*2.5,color="No Resp SX"), alpha = 0.5, size = 1.5,show.legend = T) +
+  theme_bw()+
+  ggtitle("ASV 1165") +
+  labs(colour="") +
+  scale_y_continuous(limits = c(-0.08, 0.05)) +
+  xlab("Age Category") +
+  ylab("Mean Rel Abund Diff (Pos - Neg)") +
+  scale_colour_manual(values="#BF812D") + 
+  theme(legend.position = "none")
+
+#######################################
+
+propDF2 = propDF %>%
+  dplyr::select(., ASV1581, agebin, corona) %>%
+  group_by(., agebin, corona) %>%
+  summarize(mean_size = mean(ASV1581, na.rm = TRUE))
+
+d1 = propDF2 %>%
+  subset(., corona == "Positive")
+
+d2 = propDF2 %>%
+  subset(., corona == "Negative")
+
+d3 = cbind("Positive" = d1$mean_size,"Negative" =d2$mean_size) %>%
+  data.frame(.)
+
+d3$diff = d3$Positive - d3$Negative
+d3$agebin = d2$agebin
+
+g=ggplot(data=d3, aes(x=agebin, y=diff)) +
+  geom_bar(stat="identity") +
+  geom_abline(aes(intercept = -0.02170, slope = 0.00190*2.5, color="Positive"), show.legend = T, alpha = 0.5, size = 1.5) +
+  #geom_abline(aes(intercept = 0.0576, slope = -0.00624*2.5,color="No Resp SX"), alpha = 0.5, size = 1.5,show.legend = T) +
+  theme_bw()+
+  ggtitle("ASV 1581") +
+  labs(colour="") +
+  scale_y_continuous(limits = c(-0.07, 0.03)) +
+  xlab("Age Category") +
+  ylab("Mean Rel Abund Diff (Pos - Neg)") +
+  scale_colour_manual(values="#BF812D") + 
+  theme(legend.position = "none")
+
+figure <- ggarrange(e, a,
+                    labels = c("A", "B"),
+                    ncol = 2)
+
+figure
+
+ggsave("~/BRAVE_Kids/Figures_Final/ASVFigure.PDF", figure, width = 30, height = 16, units = "cm")
+```
+
+```{r}
+sampleDF = sample_data(ps.NP) %>%
+  data.frame(.)
+
+P = sampleDF %>%
+  subset(., corona == "Positive" & resp_sx_any == "1") %>%
+  dplyr::select(., age)
+
+N = sampleDF %>%
+  subset(., corona == "Negative") %>%
+  dplyr::select(., age)
+
+NoSX = sampleDF %>%
+  subset(., corona == "Positive" & resp_sx_any == "0") %>%
+  dplyr::select(., age)
+
+shapiro.test(P$age)
+shapiro.test(N$age)
+shapiro.test(NoSX$age)
+
+wilcox.test(P$age, N$age, paired = F, alternative = "greater")
+wilcox.test(P$age, NoSX$age, paired = F, alternative = "greater")
+
+summary(P$age)
+summary(N$age)
+```
+
+```{r}
+
+```
+
+
+```{r}
+clusterSum = Shannon %>%
+  dplyr::select(age, Observed, Shannon, cluster, Covid) %>%
+  group_by(., cluster) %>%
+  summarise(median_shannon = median(Shannon),
+            FirstQ_shannon = quantile(Shannon, 0.25),
+            ThirdQ_shannon = quantile(Shannon, 0.75),
+            median_observed = median(Observed), 
+            FirstQ_observed = quantile(Observed, 0.25),
+            ThirdQ_observed = quantile(Observed, 0.75),
+            median_age = median(age),
+            FirstQ_age = quantile(age, 0.25),
+            ThirdQ_age = quantile(age, 0.75),
+            positive = sum(Covid)/length(Covid)) %>%
+  mutate_if(is.numeric, round, digits=3)
+
+
+kruskal.test(age ~ cluster, Shannon)
+
+fisher.test(table(Shannon$sex,Shannon$cluster), workspace = 2e8)
+fisher.test(table(Shannon$race,Shannon$cluster), workspace = 2e8)
+fisher.test(table(Shannon$asthma,Shannon$cluster))
+fisher.test(table(Shannon$obesity,Shannon$cluster))
+fisher.test(table(Shannon$smoking_home,Shannon$cluster))
+fisher.test(table(Shannon$abx_30d,Shannon$cluster))
+fisher.test(table(Shannon$probx_30d,Shannon$cluster))
+fisher.test(table(Shannon$corona,Shannon$cluster))
+
+ShannonPos =  subset(Shannon, corona == "Positive") 
+
+chisq.test(table(ShannonPos$resp_sx_any, ShannonPos$cluster))
+
+kruskal.test(Shannon ~ cluster, Shannon)
+kruskal.test(Observed ~ cluster, Shannon)
 ```
